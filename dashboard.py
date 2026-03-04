@@ -61,7 +61,7 @@ except ImportError:
     metrics_service_pb2 = None
     trace_service_pb2 = None
 
-__version__ = "0.11.27"
+__version__ = "0.11.28"
 
 # Extensions (Phase 2) — load plugins at import time; safe no-op if package not installed
 try:
@@ -9490,6 +9490,7 @@ async function loadHealth() {
 // Health SSE auto-refresh
 var healthStream = null;
 function startHealthStream() {
+  if (window.CLOUD_MODE) return;
   if (healthStream) healthStream.close();
   healthStream = new EventSource('/api/health-stream' + (localStorage.getItem('clawmetry-token') ? '?token=' + encodeURIComponent(localStorage.getItem('clawmetry-token')) : ''));
   healthStream.onmessage = function(e) {
@@ -9923,6 +9924,7 @@ var streamBuffer = [];
 var MAX_STREAM_LINES = 500;
 
 function startLogStream() {
+  if (window.CLOUD_MODE) return;
   if (logStream) logStream.close();
   streamBuffer = [];
   logStream = new EventSource('/api/logs-stream' + (localStorage.getItem('clawmetry-token') ? '?token=' + encodeURIComponent(localStorage.getItem('clawmetry-token')) : ''));
