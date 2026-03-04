@@ -606,9 +606,43 @@ def run_daemon() -> None:
     enc    = "🔒 E2E encrypted" if config.get("encryption_key") else "⚠️  unencrypted"
     log.info(f"Starting sync daemon — node={config['node_id']} → {INGEST_URL} ({enc})")
 
-    # Send heartbeat immediately so node appears in fleet
+    # ── First-run: full synchronous sync so customer sees data immediately ──
     send_heartbeat(config)
     log.info("Initial heartbeat sent")
+
+    first_run = not STATE_FILE.exists()
+    if first_run:
+        log.info("First run detected — performing full initial sync...")
+        state = load_state()
+        try:
+            mem = sync_memory(config, state, paths)
+            log.info(f"  Memory: {mem} files synced")
+        except Exception as e:
+            log.warning(f"  Memory sync error: {e}")
+        try:
+            ev = sync_sessions(config, state, paths)
+            log.info(f"  Sessions: {ev} events synced")
+        except Exception as e:
+            log.warning(f"  Session sync error: {e}")
+        try:
+            sm = sync_session_metadata(config)
+            log.info(f"  Session metadata: {sm} rows synced")
+        except Exception as e:
+            log.warning(f"  Session metadata error: {e}")
+        try:
+            lg = sync_logs(config, state, paths)
+            log.info(f"  Logs: {lg} lines synced")
+        except Exception as e:
+            log.warning(f"  Log sync error: {e}")
+        try:
+            cr = sync_crons(config, state, paths)
+            log.info(f"  Crons: {cr} synced")
+        except Exception as e:
+            log.warning(f"  Cron sync error: {e}")
+        state["last_sync"] = datetime.now(timezone.utc).isoformat()
+        save_state(state)
+        send_heartbeat(config)
+        log.info("Initial sync complete — node fully visible in cloud")
 
     # Start real-time log streamer in background
     start_log_streamer(config, paths)
