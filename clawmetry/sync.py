@@ -32,6 +32,7 @@ POLL_INTERVAL = 15    # seconds between sync cycles
 STREAM_INTERVAL = 2   # seconds between real-time stream pushes
 BATCH_SIZE    = 10    # events per encrypted POST
 
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [clawmetry-sync] %(levelname)s %(message)s",
@@ -602,6 +603,13 @@ def start_log_streamer(config: dict, paths: dict) -> threading.Thread:
 
 def run_daemon() -> None:
     config = load_config()
+    # If node_id looks like email prefix (contains + or @), use hostname instead
+    nid = config.get("node_id", "")
+    if not nid or "+" in nid or "@" in nid:
+        import socket
+        config["node_id"] = socket.gethostname() or platform.node() or "unknown"
+        save_config(config)
+        log.info(f"Fixed node_id: {nid!r} → {config['node_id']!r}")
     paths  = detect_paths()
     enc    = "🔒 E2E encrypted" if config.get("encryption_key") else "⚠️  unencrypted"
     log.info(f"Starting sync daemon — node={config['node_id']} → {INGEST_URL} ({enc})")

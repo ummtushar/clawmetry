@@ -61,7 +61,7 @@ except ImportError:
     metrics_service_pb2 = None
     trace_service_pb2 = None
 
-__version__ = "0.11.37"
+__version__ = "0.11.38"
 
 # Extensions (Phase 2) — load plugins at import time; safe no-op if package not installed
 try:
@@ -19788,26 +19788,58 @@ def cmd_status(args):
 
 def cmd_connect(args):
     """Connect to ClawMetry Cloud."""
+    import subprocess, pathlib
     print()
     print("🦞 ClawMetry Cloud Connect")
     print()
-    print("  1. Go to: https://clawmetry.com/connect")
-    print("  2. Sign in and copy your API key (starts with cm_)")
-    print()
-    try:
-        token = input("  Paste your API key: ").strip()
-    except (KeyboardInterrupt, EOFError):
-        print("\nCancelled.")
-        sys.exit(0)
+
+    # Stop existing sync daemon before reconfiguring
+    if _is_macos() and os.path.exists(LAUNCHD_PLIST):
+        subprocess.run(['launchctl', 'unload', LAUNCHD_PLIST], capture_output=True)
+        print("  Stopped existing sync daemon")
+    elif _is_linux():
+        subprocess.run(['systemctl', '--user', 'stop', 'clawmetry'], capture_output=True)
+        print("  Stopped existing sync daemon")
+    else:
+        pid = _read_pid()
+        if pid and _is_pid_running(pid):
+            os.kill(pid, 15)
+            print("  Stopped existing sync daemon")
+
+    token = getattr(args, 'key', None) or ''
+    if not token:
+        print("  1. Go to: https://clawmetry.com/connect")
+        print("  2. Sign in and copy your API key (starts with cm_)")
+        print()
+        try:
+            token = input("  Paste your API key: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nCancelled.")
+            sys.exit(0)
 
     if not token.startswith('cm_'):
         print("❌ Invalid key -- must start with cm_")
         sys.exit(1)
 
+    # Clear old sync state so new account gets full initial sync
+    state_file = pathlib.Path.home() / ".clawmetry" / "sync-state.json"
+    if state_file.exists():
+        state_file.unlink()
+        print("  Cleared previous sync state")
+
     _write_cloud_token(token)
     print()
-    print("[ok] Connected! View your agent at: https://app.clawmetry.com")
+    print(f"[ok] Connected! View your fleet at: https://app.clawmetry.com/fleet/?token={token}")
     print()
+
+    # Restart sync daemon with new config
+    if _is_macos() and os.path.exists(LAUNCHD_PLIST):
+        subprocess.run(['launchctl', 'load', LAUNCHD_PLIST], capture_output=True)
+        subprocess.run(['launchctl', 'start', LAUNCHD_LABEL], capture_output=True)
+        print("  Sync daemon restarted with new credentials")
+    elif _is_linux():
+        subprocess.run(['systemctl', '--user', 'start', 'clawmetry'], capture_output=True)
+        print("  Sync daemon restarted with new credentials")
 
 
 def cmd_uninstall(args):
