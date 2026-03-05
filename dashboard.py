@@ -61,7 +61,7 @@ except ImportError:
     metrics_service_pb2 = None
     trace_service_pb2 = None
 
-__version__ = "0.11.41"
+__version__ = "0.11.42"
 
 # Extensions (Phase 2) — load plugins at import time; safe no-op if package not installed
 try:
@@ -19679,7 +19679,7 @@ def cmd_start(args):
 
         subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
         subprocess.run(['systemctl', '--user', 'enable', 'clawmetry'], capture_output=True)
-        result = subprocess.run(['systemctl', '--user', 'restart', 'clawmetry'],
+        result = subprocess.run(_systemctl_cmd('restart'),
                                 capture_output=True, text=True)
         if result.returncode != 0:
             print(f"❌ Failed to start service: {result.stderr.strip()}")
@@ -19744,7 +19744,7 @@ def cmd_restart(args):
             print(f"❌ {result.stderr.strip()}")
             sys.exit(1)
     elif _is_linux():
-        result = subprocess.run(['systemctl', '--user', 'restart', 'clawmetry'],
+        result = subprocess.run(_systemctl_cmd('restart'),
                                 capture_output=True, text=True)
         if result.returncode == 0:
             print("[ok] ClawMetry restarted.")
@@ -19786,27 +19786,101 @@ def cmd_status(args):
 """)
 
 
+def _kill_all_sync_procs():
+    """Kill ALL running clawmetry sync processes (any platform)."""
+    import subprocess, signal
+    try:
+        subprocess.run(['pkill', '-9', '-f', 'clawmetry.*sync'], capture_output=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    pid = _read_pid()
+    if pid and _is_pid_running(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+def _is_root():
+    return os.geteuid() == 0 if hasattr(os, "geteuid") else False
+
+def _systemctl_cmd(action, service="clawmetry"):
+    """Build systemctl command -- omit --user when running as root."""
+    if _is_root():
+        return ["systemctl", action, service] if service else ["systemctl", action]
+    return ["systemctl", "--user", action, service] if service else ["systemctl", "--user", action]
+
+def _start_daemon_background():
+    """Start sync daemon as a background process (fallback for non-service setups)."""
+    import subprocess, pathlib as _pl
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "clawmetry.sync"],
+        stdout=open(os.devnull, "w"), stderr=open(os.devnull, "w"),
+        start_new_session=True)
+    pid_file = _pl.Path.home() / ".clawmetry" / "sync.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(proc.pid))
+    print(f"  Sync daemon started (background, PID {proc.pid})")
+
+def _is_sync_running():
+    """Check if any clawmetry sync process is running."""
+    import subprocess
+    try:
+        r = subprocess.run(["pgrep", "-f", "clawmetry.*sync"], capture_output=True, timeout=3)
+        return r.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+def _ensure_systemd_service():
+    """Create systemd service file if needed (supports root and user mode)."""
+    import pathlib as _pl, subprocess
+    if _is_root():
+        svc_dir = _pl.Path("/etc/systemd/system")
+    else:
+        svc_dir = _pl.Path.home() / ".config" / "systemd" / "user"
+    svc_path = svc_dir / "clawmetry.service"
+    svc_dir.mkdir(parents=True, exist_ok=True)
+    python_bin = sys.executable
+    home = _pl.Path.home()
+    target = "multi-user.target" if _is_root() else "default.target"
+    svc_content = f"""[Unit]
+Description=ClawMetry Sync Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={python_bin} -m clawmetry.sync
+Restart=always
+RestartSec=10
+Environment=HOME={home}
+
+[Install]
+WantedBy={target}
+"""
+    svc_path.write_text(svc_content)
+    if _is_root():
+        subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+        subprocess.run(["systemctl", "enable", "clawmetry"], capture_output=True)
+    else:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        subprocess.run(["systemctl", "--user", "enable", "clawmetry"], capture_output=True)
+
 def cmd_connect(args):
     """Connect to ClawMetry Cloud."""
     import subprocess, pathlib
     print()
-    print("🦞 ClawMetry Cloud Connect")
+    print("ClawMetry Cloud Connect")
     print()
 
-    # Stop existing sync daemon before reconfiguring
+    # Stop ALL existing sync processes aggressively
+    _kill_all_sync_procs()
     if _is_macos() and os.path.exists(LAUNCHD_PLIST):
-        subprocess.run(['launchctl', 'unload', LAUNCHD_PLIST], capture_output=True)
-        print("  Stopped existing sync daemon")
+        subprocess.run(["launchctl", "unload", LAUNCHD_PLIST], capture_output=True)
     elif _is_linux():
-        subprocess.run(['systemctl', '--user', 'stop', 'clawmetry'], capture_output=True)
-        print("  Stopped existing sync daemon")
-    else:
-        pid = _read_pid()
-        if pid and _is_pid_running(pid):
-            os.kill(pid, 15)
-            print("  Stopped existing sync daemon")
+        subprocess.run(_systemctl_cmd("stop"), capture_output=True)
+    print("  Stopped existing sync daemon")
 
-    token = getattr(args, 'key', None) or ''
+    token = getattr(args, "key", None) or ""
     if not token:
         print("  1. Go to: https://clawmetry.com/connect")
         print("  2. Sign in and copy your API key (starts with cm_)")
@@ -19817,8 +19891,8 @@ def cmd_connect(args):
             print("\nCancelled.")
             sys.exit(0)
 
-    if not token.startswith('cm_'):
-        print("❌ Invalid key -- must start with cm_")
+    if not token.startswith("cm_"):
+        print("Invalid key -- must start with cm_")
         sys.exit(1)
 
     # Clear old sync state so new account gets full initial sync
@@ -19827,29 +19901,43 @@ def cmd_connect(args):
         state_file.unlink()
         print("  Cleared previous sync state")
 
-    # Stop existing sync daemon and clear state
-    try:
-        cmd_stop(type('Args', (), {})())
-    except SystemExit:
-        pass
-    import pathlib as _pl
-    _sf = _pl.Path.home() / '.clawmetry' / 'sync-state.json'
-    if _sf.exists():
-        _sf.unlink()
-        print('  Cleared previous sync state')
     _write_cloud_token(token)
     print()
-    print(f"[ok] Connected! View your fleet at: https://app.clawmetry.com/fleet/?token={token}")
+    print(f"  Connected! View your fleet at: https://app.clawmetry.com/fleet/?token={token}")
     print()
 
-    # Restart sync daemon with new config
-    if _is_macos() and os.path.exists(LAUNCHD_PLIST):
-        subprocess.run(['launchctl', 'load', LAUNCHD_PLIST], capture_output=True)
-        subprocess.run(['launchctl', 'start', LAUNCHD_LABEL], capture_output=True)
-        print("  Sync daemon restarted with new credentials")
+    # Install + start service
+    if _is_macos():
+        if os.path.exists(LAUNCHD_PLIST):
+            subprocess.run(["launchctl", "load", LAUNCHD_PLIST], capture_output=True)
+            subprocess.run(["launchctl", "start", LAUNCHD_LABEL], capture_output=True)
+            print("  Sync daemon started (launchd)")
+        else:
+            try:
+                cmd_start(type("Args", (), {})())
+            except SystemExit:
+                _start_daemon_background()
     elif _is_linux():
-        subprocess.run(['systemctl', '--user', 'start', 'clawmetry'], capture_output=True)
-        print("  Sync daemon restarted with new credentials")
+        _ensure_systemd_service()
+        subprocess.run(_systemctl_cmd("restart"), capture_output=True)
+        print("  Sync daemon started (systemd)")
+    else:
+        _start_daemon_background()
+
+    # Verify after 3s
+    import time
+    time.sleep(3)
+    if _is_sync_running():
+        print("  Sync daemon is running -- your node will appear in ~60 seconds")
+    else:
+        # Last resort: start in background
+        print("  Service didn't start, trying background mode...")
+        _start_daemon_background()
+        time.sleep(2)
+        if _is_sync_running():
+            print("  Sync daemon is running -- your node will appear in ~60 seconds")
+        else:
+            print("  Could not start daemon. Check: cat ~/.clawmetry/sync.log")
 
 
 def cmd_uninstall(args):
@@ -19865,8 +19953,8 @@ def cmd_uninstall(args):
         else:
             print("  No launchd service found.")
     elif _is_linux():
-        subprocess.run(['systemctl', '--user', 'stop', 'clawmetry'], capture_output=True)
-        subprocess.run(['systemctl', '--user', 'disable', 'clawmetry'], capture_output=True)
+        subprocess.run(_systemctl_cmd('stop'), capture_output=True)
+        subprocess.run(_systemctl_cmd('disable'), capture_output=True)
         if os.path.exists(SYSTEMD_SERVICE):
             os.remove(SYSTEMD_SERVICE)
             print(f"  Removed: {SYSTEMD_SERVICE}")

@@ -225,7 +225,7 @@ def _detect_docker_openclaw() -> dict:
             if result:
                 return result
     except FileNotFoundError:
-        pass  # docker not installed
+        log.debug("Docker not installed or not in PATH")
     except Exception as e:
         log.debug(f"Docker detection error: {e}")
     return {}
@@ -795,4 +795,15 @@ def run_daemon() -> None:
 
 
 if __name__ == "__main__":
-    run_daemon()
+    while True:
+        try:
+            run_daemon()
+            break  # clean exit
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            import traceback
+            log.error(f"Daemon crashed: {e}")
+            log.error(traceback.format_exc())
+            log.info("Restarting in 15 seconds...")
+            time.sleep(15)
