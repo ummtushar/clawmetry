@@ -140,6 +140,36 @@ def validate_key(api_key: str) -> dict:
 # ── Path detection ─────────────────────────────────────────────────────────────
 
 
+def _find_openclaw_dirs(root, max_depth=4):
+    """Search a directory tree for OpenClaw sessions and workspace dirs."""
+    sessions_dir = None
+    workspace_dir = None
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            depth = dirpath.replace(root, "").count(os.sep)
+            if depth > max_depth:
+                dirnames.clear()
+                continue
+            # Skip noisy dirs
+            base = os.path.basename(dirpath)
+            if base in ("node_modules", ".git", "__pycache__", "venv", ".venv"):
+                dirnames.clear()
+                continue
+            if dirpath.endswith(os.sep + "agents" + os.sep + "main" + os.sep + "sessions") or                dirpath.endswith("/agents/main/sessions"):
+                if not sessions_dir:
+                    sessions_dir = dirpath
+                    log.info(f"  Found sessions: {dirpath}")
+            if os.path.basename(dirpath) == "workspace" and os.path.isfile(os.path.join(dirpath, "AGENTS.md")):
+                if not workspace_dir:
+                    workspace_dir = dirpath
+                    log.info(f"  Found workspace: {dirpath}")
+            if sessions_dir and workspace_dir:
+                break
+    except PermissionError:
+        pass
+    return sessions_dir, workspace_dir
+
+
 def _detect_docker_openclaw() -> dict:
     """Auto-detect OpenClaw running in Docker and find its data paths on the host."""
     import subprocess, json as _json
@@ -175,18 +205,13 @@ def _detect_docker_openclaw() -> dict:
                             result["sessions_dir"] = src
                         elif "agents" in dst:
                             result["sessions_dir"] = os.path.join(src, "main", "sessions")
-                        elif dst == "/data":
-                            # Check both /data/agents/... and /data/.openclaw/agents/...
-                            for sub in ["", ".openclaw"]:
-                                s = os.path.join(src, sub, "agents", "main", "sessions") if sub else os.path.join(src, "agents", "main", "sessions")
-                                if os.path.isdir(s):
-                                    result["sessions_dir"] = s
-                                    break
-                            for sub in ["", ".openclaw"]:
-                                w = os.path.join(src, sub, "workspace") if sub else os.path.join(src, "workspace")
-                                if os.path.isdir(w):
-                                    result["workspace"] = w
-                                    break
+                        elif dst in ("/data", "/app", "/home", "/root", "/opt"):
+                            # Search mount point for sessions + workspace (up to 3 levels deep)
+                            _found_s, _found_w = _find_openclaw_dirs(src)
+                            if _found_s:
+                                result["sessions_dir"] = _found_s
+                            if _found_w:
+                                result["workspace"] = _found_w
                     if "workspace" in dst:
                         result["workspace"] = src
                     if "logs" in dst or "tmp" in dst:
