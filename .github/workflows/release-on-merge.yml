@@ -13,12 +13,13 @@ jobs:
 
     permissions:
       contents: write
+      pull-requests: write
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: main
 
       - uses: actions/setup-python@v5
         with:
@@ -27,7 +28,7 @@ jobs:
       - name: Install build tools
         run: pip install build twine
 
-      - name: Bump patch version in dashboard.py
+      - name: Bump patch version
         id: bump
         run: |
           OLD=$(python3 -c "import re; print(re.search(r'__version__ = \"(.+?)\"', open('dashboard.py').read()).group(1))")
@@ -40,14 +41,6 @@ jobs:
           echo "new=$NEW" >> $GITHUB_OUTPUT
           echo "Bumped $OLD → $NEW"
 
-      - name: Commit version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add dashboard.py
-          git commit -m "chore: bump to v${{ steps.bump.outputs.new }} [skip ci]"
-          git push
-
       - name: Build package
         run: python3 -m build
 
@@ -57,7 +50,7 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: twine upload dist/*
 
-      - name: Create GitHub release
+      - name: Create GitHub release tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -65,3 +58,13 @@ jobs:
             --title "v${{ steps.bump.outputs.new }}" \
             --notes "Released via PR: ${{ github.event.pull_request.title }}" \
             --latest
+
+      - name: Open version bump PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: bump to v${{ steps.bump.outputs.new }} [skip ci]"
+          branch: "chore/bump-to-${{ steps.bump.outputs.new }}"
+          title: "chore: bump to v${{ steps.bump.outputs.new }}"
+          body: "Auto-generated after PyPI release of v${{ steps.bump.outputs.new }}."
+          labels: "automated"
