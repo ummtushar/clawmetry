@@ -39,13 +39,23 @@ jobs:
             sed -i "s/clawmetry$/clawmetry==${{ steps.oss_version.outputs.version }}/" Dockerfile
           echo "Dockerfile:"; grep clawmetry Dockerfile
 
-      - name: Commit and push version pin
+      - name: Commit and open PR
         run: |
           cd clawmetry-cloud
           git config user.email "diya-bot@clawmetry.com"
           git config user.name "Diya (auto-deploy)"
+          BRANCH="auto/pin-clawmetry-${{ steps.oss_version.outputs.version }}"
+          git checkout -b "$BRANCH"
           git add Dockerfile
-          git diff --staged --quiet && echo "No change needed" || \
-            git commit -m "chore: auto-pin clawmetry==${{ steps.oss_version.outputs.version }} from OSS"
-          git push
-          echo "✅ Cloud repo pinned to clawmetry==${{ steps.oss_version.outputs.version }} — Dhriti cron will deploy"
+          git diff --staged --quiet && echo "No change needed" && exit 0
+          git commit -m "chore: auto-pin clawmetry==${{ steps.oss_version.outputs.version }} from OSS"
+          git push origin "$BRANCH"
+          gh pr create \
+            --repo vivekchand/clawmetry-cloud \
+            --title "chore: auto-pin clawmetry==${{ steps.oss_version.outputs.version }}" \
+            --body "Automated version pin from OSS release ${{ steps.oss_version.outputs.version }}. Merge to deploy." \
+            --base main \
+            --head "$BRANCH"
+          echo "✅ PR opened to pin clawmetry==${{ steps.oss_version.outputs.version }}"
+        env:
+          GH_TOKEN: ${{ secrets.CLOUD_REPO_PAT }}
