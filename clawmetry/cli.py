@@ -3,7 +3,9 @@ from __future__ import annotations
 import sys
 import os
 
-
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _root not in sys.path:
+    sys.path.insert(0, _root)
 
 
 
@@ -53,140 +55,111 @@ def _stop_existing_daemon() -> None:
     if LOG_FILE.exists():
         LOG_FILE.write_text("")
 
-def _cmd_onboard(args) -> None:
-    """Interactive onboarding — set up cloud access or print run instructions."""
-    import os as _os
-    import sys as _sys
+def _get_api_key_interactive() -> str:
+    """Interactive API key acquisition: email OTP or direct paste."""
+    import getpass, urllib.request, urllib.error, json as _json
 
-    # Colour helpers (same as rest of CLI)
-    _is_tty = _sys.stdout.isatty()
-    def _c(code, text): return f"\033[{code}m{text}\033[0m" if _is_tty else text
-    BOLD = lambda t: _c("1", t)
-    GREEN = lambda t: _c("32", t)
-    CYAN = lambda t: _c("36", t)
-    DIM = lambda t: _c("2", t)
-    SEP = "  " + "─" * 48
+    # When stdin is piped (e.g. curl | bash install), open /dev/tty so prompts work
+    _tty = None
+    if not sys.stdin.isatty():
+        try:
+            _tty = open('/dev/tty', 'r')
+        except OSError:
+            pass
 
-    already_connected = bool(_os.environ.get("CLAWMETRY_API_KEY") or _os.environ.get("CLAWMETRY_NODE_ID"))
+    def _input(prompt):
+        """input() that reads from /dev/tty when stdin is a pipe."""
+        if _tty is not None:
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+            line = _tty.readline()
+            return line.rstrip('\n')
+        return input(prompt)
 
-    if already_connected:
-        print(f"  {GREEN(BOLD('✓ Already connected to ClawMetry Cloud'))}")
-        print(f"  {DIM('Run  clawmetry status  to check sync health.')}")
-        print()
-        print(SEP)
-        print()
-        return
+    INGEST_URL = os.environ.get("CLAWMETRY_INGEST_URL", "https://ingest.clawmetry.com")
 
-    print(f"  {BOLD('Your dashboard is ready at')}")
-    print(f"  {BOLD('app.clawmetry.com')}")
-    print()
-    print(f"  {DIM('E2E encrypted. Only you can read it.')}")
-    print()
-    print(f"      {BOLD('[Y]')} Start 7-day trial {DIM('(then $5/node/mo)')}")
-    print(f"      {BOLD('[n]')} Run locally for now")
-    print(f"          {DIM('Enable cloud anytime: clawmetry connect')}")
-    print()
-
-    try:
-        choice = input("  → [Y/n]: ").strip().lower() or 'y'
-    except (EOFError, KeyboardInterrupt):
-        choice = "n"
+    def _api_call(path, body):
+        url = INGEST_URL.rstrip("/") + path
+        data = _json.dumps(body).encode()
+        req = urllib.request.Request(url, data=data,
+                                     headers={"Content-Type": "application/json"},
+                                     method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return _json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return {"error": e.read().decode()[:200]}
+        except Exception as e:
+            return {"error": str(e)}
 
     print()
+    print("  ┌─────────────────────────────────────┐")
+    print("  │  Connect to ClawMetry Cloud         │")
+    print("  └─────────────────────────────────────┘")
+    print()
+    print("  Enter your email to sign up / sign in,")
+    print("  or paste an existing API key (cm_…).")
+    print()
 
-    if choice == "y":
-        print(f"  {DIM('Starting clawmetry connect...')}")
-        print()
-        import argparse as _ap
-        _fake_args = _ap.Namespace(key=None, foreground=False, custom_node_id=None)
-        _cmd_connect(_fake_args)
-        return
+    entry = _input("  Email or API key: ").strip()
 
-    # User said no — print run instructions
-    print(SEP)
+    # If it's already an API key, return it directly
+    if entry.startswith("cm_"):
+        return entry
+
+    # Email flow: send OTP
+    import re as _re
+    if not _re.match(r'^[^@]+@[^@]+\.[^@]+$', entry):
+        print("  ❌  That doesn't look like a valid email or API key.")
+        # Fall back to manual key entry
+        return getpass.getpass("  API key (cm_…): ").strip()
+
+    email = entry.lower()
+    print(f"\n  Sending code to {email}…", end="", flush=True)
+    r = _api_call("/api/auth/email-otp", {"action": "send", "email": email})
+    if r.get("error"):
+        print(f" ❌  {r['error']}")
+        print("  Visit https://clawmetry.com/connect to get your API key.")
+        return getpass.getpass("  API key (cm_…): ").strip()
+    print(" ✅")
     print()
-    print(f"  Run with:")
+
+    # Ask for OTP
+    for attempt in range(3):
+        otp = _input("  Enter the 6-digit code from your email: ").strip()
+        if not otp:
+            continue
+        print("  Verifying…", end="", flush=True)
+        r2 = _api_call("/api/auth/email-otp", {"action": "verify", "email": email, "otp": otp})
+        if r2.get("error"):
+            print(f" ❌  {r2['error']}")
+            if attempt < 2:
+                print("  Try again.")
+            continue
+        api_key = r2.get("api_key", "")
+        if api_key.startswith("cm_"):
+            is_new = r2.get("is_new", False)
+            print(f" ✅  {'Account created' if is_new else 'Welcome back'}!")
+            print()
+            return api_key
+        print(" ❌  Server returned an unexpected response.")
+        break
+
     print()
-    print(f"    {BOLD('clawmetry --host 0.0.0.0 --port 8900')}        {DIM('# foreground (LAN accessible)')}")
-    print(f"    {BOLD('clawmetry start --host 0.0.0.0 --port 8900')}  {DIM('# background service (LAN accessible)')}")
-    print()
-    print(SEP)
-    print()
-    print(f"  {BOLD('🌐  Access from anywhere:')}  {BOLD('clawmetry connect')}")
-    print(f"      {DIM('🔒  E2E encrypted with your local key — decrypted on demand.')}")
-    print(f"      {DIM('Free 7-day trial · no credit card required.')}")
-    print()
-    print(f"  Docs:  {CYAN('https://clawmetry.com/how-it-works')}")
-    print()
-    print("  🦞  Happy observing!")
-    print()
+    print("  Couldn't verify. Visit https://clawmetry.com/connect to get your key.")
+    return getpass.getpass("  API key (cm_…): ").strip()
 
 
 def _cmd_connect(args) -> None:
     """clawmetry connect — validate key, save config, start daemon."""
-    # Read existing config FIRST — before stopping daemon (avoids race condition)
-    _saved_key = ''
-    _saved_node_id = ''
-    try:
-        import json as _jcfg_pre
-        _cfgpath_pre = os.path.expanduser('~/.clawmetry/config.json')
-        _cfg_pre_data = _jcfg_pre.load(open(_cfgpath_pre))
-        _saved_key = _cfg_pre_data.get('encryption_key', '')
-        _saved_node_id = _cfg_pre_data.get('node_id', '')
-    except Exception:
-        pass
     _stop_existing_daemon()
     import getpass
     from clawmetry.sync import validate_key, save_config, CONFIG_FILE, CONFIG_DIR
     import platform, socket
 
     api_key = args.key or os.environ.get("CLAWMETRY_API_KEY") or ""
-    _email_authed = False
-
-    # Terminal sign-up/sign-in: if no API key, collect email + OTP
     if not api_key:
-        import urllib.request as _urlibsignup, json as _jsonsignup
-        _CLOUD = 'https://app.clawmetry.com'
-        def _signup_post(path, payload):
-            _req = _urlibsignup.Request(_CLOUD + path,
-                data=_jsonsignup.dumps(payload).encode(),
-                headers={'Content-Type': 'application/json'}, method='POST')
-            with _urlibsignup.urlopen(_req, timeout=12) as _r:
-                return _jsonsignup.loads(_r.read())
-
-        print()
-        _email_in = input("  \U0001f4e7  Enter your email: ").strip().lower()
-        if not _email_in:
-            print("  \u274c  Email required.")
-            sys.exit(1)
-        print("  \U0001f510  Sending verification code...", end="", flush=True)
-        try:
-            _signup_post('/api/auth/email-otp', {'action': 'send', 'email': _email_in})
-        except Exception as _se:
-            print(f" failed ({_se})")
-            sys.exit(1)
-        print(" sent.")
-        print(f"  \U0001f4ec  Check your inbox for the 6-digit code.")
-        _otp_in = input("  Enter OTP: ").strip()
-        try:
-            _vfy = _signup_post('/api/auth/email-otp', {'action': 'verify', 'email': _email_in, 'otp': _otp_in})
-        except Exception as _ve:
-            print(f"\n  \u274c  Verification failed: {_ve}")
-            sys.exit(1)
-        if not _vfy.get('ok'):
-            print(f"\n  \u274c  {_vfy.get('error', 'Incorrect OTP')}")
-            sys.exit(1)
-        api_key = _vfy['api_key']
-        _email_authed = True
-        if _vfy.get('is_new'):
-            print(f"  \u2705  Account created! 7-day free trial started.")
-        else:
-            print(f"  \u2705  Signed in.")
-        print()
-
-    if not api_key:
-        print("Get your API key at: https://clawmetry.com/connect\n")
-        api_key = getpass.getpass("ClawMetry API key (cm_…): ").strip()
+        api_key = _get_api_key_interactive()
 
     if not api_key.startswith("cm_"):
         print("❌  Key must start with cm_")
@@ -194,9 +167,14 @@ def _cmd_connect(args) -> None:
 
     custom_name = getattr(args, 'custom_node_id', None) or ''
     machine_hostname = custom_name or socket.gethostname()
-    # Use key saved at top of function (before daemon stop)
-    _existing_node_id = _saved_node_id
-    _existing_key = _saved_key
+    # Read existing node_id from config so reconnect on same machine keeps same node
+    _existing_node_id = ''
+    try:
+        import json as _jcfg
+        _cfgpath = os.path.expanduser('~/.clawmetry/config.json')
+        _existing_node_id = _jcfg.load(open(_cfgpath)).get('node_id', '')
+    except Exception:
+        pass
     print("Connecting to ClawMetry Cloud… ", end="", flush=True)
     try:
         result = validate_key(api_key, hostname=machine_hostname, existing_node_id=_existing_node_id)
@@ -211,94 +189,17 @@ def _cmd_connect(args) -> None:
         else:
             print(f"❌  {e}")
             sys.exit(1)
-    # 🔐 Device OTP — skipped when already verified via email sign-in
-    if not _email_authed:
-        try:
-            import socket as _sock, platform as _plat, urllib.request as _urlibr, json as _jsotp
-            try:
-                _udp = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-                _udp.connect(('8.8.8.8', 80))
-                _local_ips = [_udp.getsockname()[0]]
-                _udp.close()
-            except Exception:
-                try:
-                    _local_ips = [_sock.gethostbyname(_sock.gethostname())]
-                except Exception:
-                    _local_ips = []
-            _sysinfo = {
-                'Device': machine_hostname,
-                'OS': _plat.system() + ' ' + _plat.release() + ' (' + _plat.machine() + ')',
-                'IP': ', '.join(_local_ips) or 'unknown',
-                'Node ID': node_id,
-            }
-            _otp_headers = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + api_key}
-            def _cloud_otp(payload):
-                _req = _urlibr.Request('https://app.clawmetry.com/api/account/connect-otp',
-                    data=_jsotp.dumps(payload).encode(), headers=_otp_headers, method='POST')
-                with _urlibr.urlopen(_req, timeout=10) as _r: return _jsotp.loads(_r.read())
-            _otp_r = _cloud_otp({'api_key': api_key, 'action': 'send',
-                                  'hostname': machine_hostname, 'sysinfo': _sysinfo})
-            _otp_email = _otp_r.get('email', 'your registered email')
-            print(f"\n  \U0001f510  Verification required.")
-            print(f"  \U0001f4e7  OTP sent to {_otp_email} — check your inbox.")
-            _otp_in = input("  Enter OTP: ").strip()
-            _vfy = _cloud_otp({'api_key': api_key, 'action': 'verify', 'otp': _otp_in})
-            if not _vfy.get('ok'):
-                print(f"\n  \u274c  Verification failed: {_vfy.get('error', 'Incorrect OTP')}")
-                sys.exit(1)
-            print("  \u2705  Device authorised.")
-        except (SystemExit, KeyboardInterrupt):
-            raise
-        except Exception as _otp_err:
-            print(f"\n  \u274c  OTP verification failed: {_otp_err}")
-            print("  Cannot connect without device verification. Try again or contact support.")
-            sys.exit(1)
 
     from clawmetry.sync import generate_encryption_key
-
-    # Handle --secret-key: require OTP confirmation before accepting new key
-    supplied_key = getattr(args, 'secret_key', None) or os.environ.get('CLAWMETRY_SECRET_KEY', '')
-    if supplied_key and supplied_key != _existing_key:
-        # Send OTP to email
-        try:
-            from clawmetry.sync import _post
-            _otp_resp = _post('/api/account/key-change-otp', {'api_key': api_key, 'action': 'send'}, api_key, timeout=8)
-            _otp_email = _otp_resp.get('email', 'your registered email')
-            print(f'\n  OTP sent to {_otp_email}.')
-            _otp_entered = input('  Enter OTP to confirm key change: ').strip()
-            _verify = _post('/api/account/key-change-otp', {'api_key': api_key, 'action': 'verify', 'otp': _otp_entered}, api_key, timeout=8)
-            if not _verify.get('ok'):
-                print(f"\n  OTP verification failed: {_verify.get('error', 'Unknown error')}")
-                sys.exit(1)
-            enc_key = supplied_key
-            print('  Secret key updated.')
-        except SystemExit:
-            raise
-        except Exception as _otp_err:
-            print(f'\n  Could not complete OTP verification: {_otp_err}')
-            sys.exit(1)
-    else:
-        if _existing_key:
-            # Reuse existing key — no prompt needed
-            enc_key = _existing_key
-            _masked = enc_key[:6] + "…" + enc_key[-4:]
-            print(f"  🔑  Encryption key: {_masked}  (run clawmetry status --show-key to reveal)")
-        else:
-            # New device / new account — prompt user
-            print()
-            print("  \U0001f510  E2E Encryption Key")
-            print("  All your data is encrypted end-to-end. You need this key to decrypt and view it in the web app.")
-            print("  ClawMetry never stores or sees this key.")
-            print()
-            _key_input = input("  Enter a secret key (or press Enter to auto-generate): ").strip()
-            if _key_input:
-                enc_key = _key_input
-                print(f"  \u2705  Using your key.")
-            else:
-                enc_key = generate_encryption_key()
-                print(f"  \U0001f511  Generated key: {enc_key}")
-                print(f"  \u26a0\ufe0f   Save this somewhere safe — you need it to decrypt your data in the web app.")
-            print()
+    # Preserve existing key on reconnect — only generate new key on first connect
+    _existing_key = ''
+    try:
+        import json as _jx, os as _ox
+        _cfg = _jx.load(open(_ox.path.expanduser('~/.clawmetry/config.json')))
+        _existing_key = _cfg.get('encryption_key', '')
+    except Exception:
+        pass
+    enc_key = _existing_key or generate_encryption_key()
 
     config = {
         "api_key": api_key,
@@ -310,34 +211,16 @@ def _cmd_connect(args) -> None:
     save_config(config)
 
     print()
-    print(f"  \U0001f7e2  Connected as: {node_id}")
+    print(f"  Connected as: {node_id}")
+    print()
+    print("  Keep this secret key safe (like a password):")
+    print(f"  {enc_key}")
     print()
 
     # Start daemon
     _start_daemon(config, args)
     print()
-    print("  All done!")
-    print()
-    input("  Press Enter to open your ClawMetry dashboard... ")
-    try:
-        import webbrowser as _wb, urllib.request as _wbr, json as _wbj
-        _dashboard_url = 'https://app.clawmetry.com/cloud'
-        try:
-            # Create one-time setup token so browser gets enc key automatically
-            _req = _wbr.Request(
-                'https://app.clawmetry.com/api/cloud/setup-session',
-                data=_wbj.dumps({'api_key': api_key, 'enc_key': enc_key, 'node_id': node_id}).encode(),
-                headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + api_key},
-                method='POST')
-            with _wbr.urlopen(_req, timeout=6) as _wr:
-                _wresp = _wbj.loads(_wr.read())
-            if _wresp.get('setup_token'):
-                _dashboard_url = 'https://app.clawmetry.com/cloud?setup=' + _wresp['setup_token']
-        except Exception:
-            pass
-        _wb.open(_dashboard_url)
-    except Exception:
-        print("  Open: https://app.clawmetry.com")
+    print("  All done! Open app.clawmetry.com to see your dashboard.")
     print()
 
 
@@ -367,8 +250,9 @@ def _register_launchd(config: dict) -> None:
     from clawmetry.sync import CONFIG_DIR, LOG_FILE
     label = "com.clawmetry.sync"
     plist_path = __import__("pathlib").Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
-    # Always use the Python running the CLI (correct venv). Fixes #127.
-    python = sys.executable
+    # Resolve python3 at registration time, but use -m so pip upgrades take effect
+    import shutil
+    python = shutil.which("python3") or sys.executable
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -409,8 +293,8 @@ def _register_systemd(config: dict) -> None:
     service_dir = __import__("pathlib").Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
     service_path = service_dir / f"{label}.service"
-    # Always use the Python running the CLI (correct venv). Fixes #127.
-    python = sys.executable
+    import shutil
+    python = shutil.which("python3") or sys.executable
 
     unit = f"""[Unit]
 Description=ClawMetry Cloud Sync Daemon
@@ -475,44 +359,6 @@ def _cmd_disconnect(args) -> None:
     print("Disconnected from ClawMetry Cloud.")
 
 
-def _detect_openclaw() -> bool:
-    """Check if OpenClaw is installed on this machine."""
-    import shutil
-    from pathlib import Path
-
-    # 1. Check if openclaw binary exists in PATH
-    if shutil.which("openclaw") or shutil.which("openclaw-gateway"):
-        return True
-
-    # 2. Check common session directory locations
-    home = Path.home()
-    candidates = [
-        home / ".openclaw" / "agents" / "main" / "sessions",
-        Path("/data/agents/main/sessions"),
-        Path("/app/agents/main/sessions"),
-        Path("/opt/openclaw/agents/main/sessions"),
-    ]
-    oc_home = os.environ.get("OPENCLAW_HOME", "")
-    if oc_home:
-        candidates.insert(0, Path(oc_home) / "agents" / "main" / "sessions")
-
-    if any(p.exists() for p in candidates):
-        return True
-
-    # 3. Check npm global list (best-effort)
-    if shutil.which("npm"):
-        import subprocess
-        try:
-            r = subprocess.run(["npm", "list", "-g", "openclaw", "--depth=0"],
-                               capture_output=True, text=True, timeout=5)
-            if "openclaw" in r.stdout and "empty" not in r.stdout:
-                return True
-        except Exception:
-            pass
-
-    return False
-
-
 def _cmd_status(args) -> None:
     """clawmetry status — show local + cloud sync status."""
     import platform
@@ -572,24 +418,6 @@ def _cmd_status(args) -> None:
         running = r.stdout.strip() == "active"
         print(f"  Daemon:      {'✅  Running (systemd)' if running else '○  Not running'}")
 
-    # OpenClaw detection — warn with install guide if not found (closes #128)
-    if not _detect_openclaw():
-        Y = '\033[0;33m'  # yellow
-        C = '\033[0;36m'  # cyan
-        N = '\033[0m'     # reset
-        print(f"\n  {Y}⚠️  OpenClaw not detected on this machine{N}")
-        print()
-        print("  ClawMetry needs OpenClaw to monitor. Install it:")
-        print()
-        print(f"    {C}npm install -g openclaw{N}          # via npm")
-        print()
-        print("  Then start OpenClaw:")
-        print(f"    {C}openclaw{N}                         # interactive setup")
-        print(f"    {C}openclaw gateway start{N}           # start the agent")
-        print()
-        print(f"  Docs: {C}https://openclaw.ai/docs{N}")
-        print(f"  Set {C}OPENCLAW_HOME{N} if installed in a custom location.")
-
     if LOG_FILE.exists():
         print(f"  Log:         {LOG_FILE}")
         # Last 3 lines
@@ -598,38 +426,231 @@ def _cmd_status(args) -> None:
             print(f"    {ln}")
 
 
+def _cmd_onboard(args) -> None:
+    """clawmetry onboard — full first-time setup wizard (always run after install)."""
+    CYAN = '\033[0;36m'
+    BOLD = '\033[1m'
+    NC = '\033[0m'
+
+    print()
+    print(f"  {BOLD}Welcome to ClawMetry 🦞{NC}")
+    print(f"  Let's get your agent connected to the cloud dashboard.")
+    print()
+
+    # Run the connect flow
+    _cmd_connect(args)
+
+    # Open the app in the default browser
+    try:
+        import webbrowser
+        webbrowser.open("https://app.clawmetry.com")
+    except Exception:
+        pass
+
+    print(f"  {CYAN}→{NC} Opening app.clawmetry.com in your browser...")
+    print()
+    print(f"  {BOLD}Setup complete!{NC} Your agent is now streaming to ClawMetry Cloud.")
+    print()
+
+
+def _cmd_proxy(args) -> None:
+    """clawmetry proxy — manage the enforcement proxy."""
+    from clawmetry.proxy import (
+        ProxyConfig, run_proxy, stop_proxy, proxy_status as _proxy_status,
+        PROXY_CONFIG_FILE,
+    )
+
+    _is_tty = sys.stdout.isatty()
+    def _c(code, text): return f"\033[{code}m{text}\033[0m" if _is_tty else text
+    BOLD = lambda t: _c("1", t)
+    GREEN = lambda t: _c("32", t)
+    CYAN = lambda t: _c("36", t)
+    DIM = lambda t: _c("2", t)
+    YELLOW = lambda t: _c("33", t)
+
+    proxy_cmd = getattr(args, "proxy_cmd", None)
+
+    if proxy_cmd == "start":
+        config = ProxyConfig.load()
+
+        # Apply CLI overrides
+        if args.port is not None:
+            config.port = args.port
+        if args.host is not None:
+            config.host = args.host
+        if args.daily_budget is not None:
+            config.budget.daily_usd = args.daily_budget
+        if args.monthly_budget is not None:
+            config.budget.monthly_usd = args.monthly_budget
+        if args.no_loop_detection:
+            config.loop_detection.enabled = False
+        if args.log_requests:
+            config.log_requests = True
+
+        config.save()
+
+        print()
+        print(f"  {BOLD('🦞 ClawMetry Proxy')}")
+        print()
+        print(f"  Listening on {CYAN(f'http://{config.host}:{config.port}')}")
+        print()
+        print(f"  Budget:         {_format_budget(config, GREEN, YELLOW, DIM)}")
+        print(f"  Loop detection: {GREEN('on') if config.loop_detection.enabled else DIM('off')}")
+        print(f"  Routing rules:  {len(config.routing_rules)}")
+        print()
+        print(f"  {BOLD('To activate, set in your environment:')}")
+        print(f"    {CYAN(f'ANTHROPIC_BASE_URL=http://localhost:{config.port}')}")
+        print(f"    {DIM('(OpenClaw will route all LLM calls through the proxy)')}")
+        print()
+
+        if not args.foreground:
+            import subprocess
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "clawmetry.proxy",
+                 "--port", str(config.port),
+                 "--host", config.host],
+                stdout=open(str(PROXY_CONFIG_FILE.parent / "proxy.log"), "a"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            print(f"  {GREEN('✓')} Proxy started in background (pid {proc.pid})")
+            print(f"  {DIM(f'Log: {PROXY_CONFIG_FILE.parent / \"proxy.log\"}')} ")
+            print()
+        else:
+            print(f"  Running in foreground (Ctrl+C to stop)")
+            print()
+            run_proxy(config, foreground=True)
+
+    elif proxy_cmd == "stop":
+        if stop_proxy():
+            print(f"  {GREEN('✓')} Proxy stopped")
+        else:
+            print(f"  {DIM('Proxy is not running')}")
+
+    elif proxy_cmd == "status":
+        status = _proxy_status()
+        if getattr(args, "as_json", False):
+            import json
+            print(json.dumps(status, indent=2))
+            return
+
+        if status.get("running"):
+            print(f"  Proxy: {GREEN('running')} (pid {status['pid']})")
+            try:
+                import urllib.request, json
+                config = ProxyConfig.load()
+                url = f"http://{config.host}:{config.port}/proxy/status"
+                with urllib.request.urlopen(url, timeout=3) as r:
+                    detail = json.loads(r.read())
+                print(f"  Uptime:    {_format_uptime(detail.get('uptime_seconds', 0))}")
+                print(f"  Requests:  {detail.get('requests_total', 0)} total, {detail.get('requests_blocked', 0)} blocked")
+                print(f"  Loops:     {detail.get('loops_detected', 0)} detected")
+                b = detail.get("budget", {})
+                if b.get("daily_limit", 0) > 0:
+                    print(f"  Daily:     ${b['daily_spent']:.2f} / ${b['daily_limit']:.2f}")
+                if b.get("monthly_limit", 0) > 0:
+                    print(f"  Monthly:   ${b['monthly_spent']:.2f} / ${b['monthly_limit']:.2f}")
+            except Exception:
+                pass
+        else:
+            print(f"  Proxy: {DIM('not running')}")
+            print(f"  Start with: {CYAN('clawmetry proxy start')}")
+
+    elif proxy_cmd == "config":
+        config = ProxyConfig.load()
+        changed = False
+
+        if args.daily_budget is not None:
+            config.budget.daily_usd = args.daily_budget
+            changed = True
+        if args.monthly_budget is not None:
+            config.budget.monthly_usd = args.monthly_budget
+            changed = True
+        if args.action is not None:
+            config.budget.action = args.action
+            changed = True
+        if args.loop_detection is not None:
+            config.loop_detection.enabled = (args.loop_detection == "on")
+            changed = True
+
+        if changed:
+            config.save()
+            print(f"  {GREEN('✓')} Config updated")
+
+        print(f"\n  {BOLD('Proxy Configuration')}")
+        print(f"  {'─' * 40}")
+        print(f"  Port:           {config.port}")
+        print(f"  Host:           {config.host}")
+        print(f"  Daily budget:   {'$' + str(config.budget.daily_usd) if config.budget.daily_usd > 0 else DIM('unlimited')}")
+        print(f"  Monthly budget: {'$' + str(config.budget.monthly_usd) if config.budget.monthly_usd > 0 else DIM('unlimited')}")
+        print(f"  Action:         {config.budget.action}")
+        print(f"  Loop detection: {GREEN('on') if config.loop_detection.enabled else DIM('off')}")
+        print(f"  Routing rules:  {len(config.routing_rules)}")
+        print(f"\n  Config file: {DIM(str(PROXY_CONFIG_FILE))}")
+        print()
+
+    else:
+        print(f"\n  {BOLD('🦞 ClawMetry Proxy')} — enforcement layer for LLM API calls")
+        print()
+        print(f"  {BOLD('Commands:')}")
+        print(f"    clawmetry proxy start    Start the proxy server")
+        print(f"    clawmetry proxy stop     Stop the proxy server")
+        print(f"    clawmetry proxy status   Show proxy status")
+        print(f"    clawmetry proxy config   View/update proxy config")
+        print()
+        print(f"  {BOLD('Quick start:')}")
+        print(f"    clawmetry proxy start --daily-budget 10")
+        print(f"    export ANTHROPIC_BASE_URL=http://localhost:4100")
+        print()
+
+
+def _format_budget(config, GREEN, YELLOW, DIM):
+    """Format budget display for CLI output."""
+    parts = []
+    if config.budget.daily_usd > 0:
+        parts.append(f"${config.budget.daily_usd:.2f}/day")
+    if config.budget.monthly_usd > 0:
+        parts.append(f"${config.budget.monthly_usd:.2f}/mo")
+    if parts:
+        return f"{YELLOW(', '.join(parts))} ({config.budget.action})"
+    return DIM("unlimited")
+
+
+def _format_uptime(seconds):
+    """Format uptime in human-readable form."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f}m"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
 def main() -> None:
     import argparse
-    import importlib.util as _ilu, pathlib as _pl
-    _dp = _pl.Path(__file__).parent.parent / "dashboard.py"
-    _spec = _ilu.spec_from_file_location("_clawmetry_dashboard", str(_dp))
-    _mod = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
-    dashboard_main = _mod.main
+    from dashboard import main as dashboard_main
 
-    # Windows: force UTF-8 stdout/stderr to avoid UnicodeEncodeError on CP1252
-    # terminals (box-drawing chars, emoji). Also disable argparse color (Python
-    # 3.14 calls file.fileno() on a closed file → ValueError).
+    # Python 3.14 on Windows: argparse's color detection calls file.fileno()
+    # on a closed file, raising ValueError. NO_COLOR disables this code path.
+    # https://github.com/python/cpython/issues/127321
     if sys.platform == "win32":
         os.environ.setdefault("NO_COLOR", "1")
-        os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-        try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
 
     parser = argparse.ArgumentParser(prog="clawmetry", add_help=False)
     sub = parser.add_subparsers(dest="cmd")
+
+    # onboard — first-time setup wizard (called by install.sh)
+    p_onboard = sub.add_parser("onboard", help="First-time setup wizard (run after install)")
+    p_onboard.add_argument("--key", metavar="cm_xxx", help="API key (skip prompt)")
+    p_onboard.add_argument("--foreground", action="store_true", help="Run daemon in foreground")
+    p_onboard.add_argument("--node-id", metavar="NAME", dest="custom_node_id", help="Custom node name (default: hostname)")
 
     # connect
     p_connect = sub.add_parser("connect", help="Activate cloud sync")
     p_connect.add_argument("--key", metavar="cm_xxx", help="API key (skip prompt)")
     p_connect.add_argument("--foreground", action="store_true", help="Run daemon in foreground")
     p_connect.add_argument("--node-id", metavar="NAME", dest="custom_node_id", help="Custom node name (default: hostname)")
-
-    # onboard
-    sub.add_parser("onboard", help="Interactive setup: cloud access or local run instructions")
 
     # disconnect
     sub.add_parser("disconnect", help="Stop cloud sync and remove key")
@@ -638,17 +659,44 @@ def main() -> None:
     p_status = sub.add_parser("status", help="Show local + cloud sync status")
     p_status.add_argument("--show-key", action="store_true", help="Reveal secret key")
 
+    # proxy
+    p_proxy = sub.add_parser("proxy", help="Local enforcement proxy (budget, loops, routing)")
+    proxy_sub = p_proxy.add_subparsers(dest="proxy_cmd")
+
+    p_proxy_start = proxy_sub.add_parser("start", help="Start the proxy server")
+    p_proxy_start.add_argument("--port", type=int, help="Port (default: 4100)")
+    p_proxy_start.add_argument("--host", default=None, help="Bind host (default: 127.0.0.1)")
+    p_proxy_start.add_argument("--foreground", action="store_true", help="Run in foreground")
+    p_proxy_start.add_argument("--daily-budget", type=float, metavar="USD", help="Daily budget limit in USD")
+    p_proxy_start.add_argument("--monthly-budget", type=float, metavar="USD", help="Monthly budget limit in USD")
+    p_proxy_start.add_argument("--no-loop-detection", action="store_true", help="Disable loop detection")
+    p_proxy_start.add_argument("--log-requests", action="store_true", help="Log all proxied requests")
+
+    proxy_sub.add_parser("stop", help="Stop the proxy server")
+
+    p_proxy_status = proxy_sub.add_parser("status", help="Show proxy status")
+    p_proxy_status.add_argument("--json", action="store_true", dest="as_json", help="Output as JSON")
+
+    p_proxy_config = proxy_sub.add_parser("config", help="Show or update proxy config")
+    p_proxy_config.add_argument("--daily-budget", type=float, metavar="USD", help="Set daily budget")
+    p_proxy_config.add_argument("--monthly-budget", type=float, metavar="USD", help="Set monthly budget")
+    p_proxy_config.add_argument("--action", choices=["block", "warn", "downgrade"], help="Budget action")
+    p_proxy_config.add_argument("--loop-detection", choices=["on", "off"], help="Toggle loop detection")
+
     # Parse just the first token to decide if it's a sub-command or dashboard flag
-    if len(sys.argv) > 1 and sys.argv[1] in ("connect", "disconnect", "status", "onboard"):
+    _subcmds = ("onboard", "connect", "disconnect", "status", "proxy")
+    if len(sys.argv) > 1 and sys.argv[1] in _subcmds:
         args = parser.parse_args()
-        if args.cmd == "connect":
+        if args.cmd == "onboard":
+            _cmd_onboard(args)
+        elif args.cmd == "connect":
             _cmd_connect(args)
         elif args.cmd == "disconnect":
             _cmd_disconnect(args)
         elif args.cmd == "status":
             _cmd_status(args)
-        elif args.cmd == "onboard":
-            _cmd_onboard(args)
+        elif args.cmd == "proxy":
+            _cmd_proxy(args)
     else:
         # Fall through to dashboard (handles --host, --port, --version, start, stop, etc.)
         dashboard_main()
