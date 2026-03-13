@@ -20639,10 +20639,13 @@ def _run_server(args):
             import logging
             log = logging.getLogger('werkzeug')
             log.setLevel(logging.ERROR)
-            # cli=False prevents Click from printing the "Serving Flask app" banner,
-            # which crashes on Windows when stdout is redirected (closed fileno).
-            if os.name == 'nt':
-                os.environ['FLASK_RUN_FROM_CLI'] = 'false'
+            # On Windows with redirected stdout, Click's show_server_banner
+            # crashes calling fileno() on a closed handle. Patch it out.
+            try:
+                import flask.cli
+                flask.cli.show_server_banner = lambda *a, **kw: None
+            except Exception:
+                pass
             app.run(host=args.host, port=args.port, debug=False, use_reloader=False, threaded=True)
 
 
