@@ -425,30 +425,53 @@ def _cmd_status(args) -> None:
 
 
 def _cmd_onboard(args) -> None:
-    """clawmetry onboard — full first-time setup wizard (always run after install)."""
+    """clawmetry onboard — first-time setup wizard. Asks user if they want cloud."""
     CYAN = '\033[0;36m'
+    GREEN = '\033[0;32m'
+    DIM = '\033[2m'
     BOLD = '\033[1m'
     NC = '\033[0m'
 
     print()
     print(f"  {BOLD}Welcome to ClawMetry 🦞{NC}")
-    print(f"  Let's get your agent connected to the cloud dashboard.")
+    print()
+    print(f"  {BOLD}Connect to ClawMetry Cloud?{NC}")
+    print(f"  {DIM}Access your dashboard from app.clawmetry.com{NC}")
+    print(f"  {DIM}E2E encrypted. Free 7-day trial, then $5/node/mo.{NC}")
+    print()
+    print(f"      {BOLD}[Y]{NC} Connect to cloud")
+    print(f"      {BOLD}[n]{NC} Run locally only")
+    print(f"          {DIM}You can connect anytime later: clawmetry connect{NC}")
     print()
 
-    # Run the connect flow
-    _cmd_connect(args)
-
-    # Open the app in the default browser
     try:
-        import webbrowser
-        webbrowser.open("https://app.clawmetry.com")
-    except Exception:
-        pass
+        choice = input("  → [Y/n]: ").strip().lower() or 'y'
+    except (EOFError, KeyboardInterrupt):
+        choice = 'n'
+        print()
 
-    print(f"  {CYAN}→{NC} Opening app.clawmetry.com in your browser...")
     print()
-    print(f"  {BOLD}Setup complete!{NC} Your agent is now streaming to ClawMetry Cloud.")
-    print()
+
+    if choice in ('y', 'yes'):
+        _cmd_connect(args)
+        try:
+            import webbrowser
+            webbrowser.open("https://app.clawmetry.com")
+        except Exception:
+            pass
+        print(f"  {CYAN}→{NC} Opening app.clawmetry.com in your browser...")
+        print()
+        print(f"  {BOLD}Setup complete!{NC} Your agent is now streaming to ClawMetry Cloud.")
+        print()
+    else:
+        print(f"  {GREEN}✓{NC} ClawMetry installed (local mode)")
+        print()
+        print(f"  Start your dashboard:")
+        print(f"    {CYAN}clawmetry{NC}         — launch on http://localhost:8900")
+        print(f"    {CYAN}clawmetry start{NC}   — run as background service")
+        print()
+        print(f"  {DIM}Connect to cloud later: clawmetry connect{NC}")
+        print()
 
 
 def _cmd_proxy(args) -> None:
