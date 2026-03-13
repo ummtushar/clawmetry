@@ -512,7 +512,8 @@ def _cmd_proxy(args) -> None:
                 start_new_session=True,
             )
             print(f"  {GREEN('✓')} Proxy started in background (pid {proc.pid})")
-            print(f"  {DIM(f'Log: {PROXY_CONFIG_FILE.parent / \"proxy.log\"}')} ")
+            _log_path = PROXY_CONFIG_FILE.parent / "proxy.log"
+            print(f"  {DIM(f'Log: {_log_path}')} ")
             print()
         else:
             print(f"  Running in foreground (Ctrl+C to stop)")
