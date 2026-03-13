@@ -123,11 +123,6 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-echo "  Run with:"
-echo ""
-echo "    clawmetry --host 0.0.0.0 --port 8900          # foreground (LAN accessible)"
-echo "    clawmetry start --host 0.0.0.0 --port 8900    # background service (LAN accessible)"
-echo ""
-echo "  Docs: https://clawmetry.com/how-it-works"
-echo ""
-echo "🦞 Happy observing!"
+# ── Onboarding — ask user if they want cloud or local ─────────────────────────
+
+"$CLAWMETRY_BIN" onboard < /dev/tty
