@@ -93,15 +93,7 @@ def _get_api_key_interactive() -> str:
             return {"error": str(e)}
 
     print()
-    print("  ┌─────────────────────────────────────┐")
-    print("  │  Connect to ClawMetry Cloud         │")
-    print("  └─────────────────────────────────────┘")
-    print()
-    print("  Enter your email to sign up / sign in,")
-    print("  or paste an existing API key (cm_…).")
-    print()
-
-    entry = _input("  Email or API key: ").strip()
+    entry = _input("  📧 Enter your email: ").strip()
 
     # If it's already an API key, return it directly
     if entry.startswith("cm_"):
@@ -110,12 +102,11 @@ def _get_api_key_interactive() -> str:
     # Email flow: send OTP
     import re as _re
     if not _re.match(r'^[^@]+@[^@]+\.[^@]+$', entry):
-        print("  ❌  That doesn't look like a valid email or API key.")
-        # Fall back to manual key entry
+        print("  ❌  That doesn't look like a valid email.")
         return getpass.getpass("  API key (cm_…): ").strip()
 
     email = entry.lower()
-    print(f"\n  Sending code to {email}…", end="", flush=True)
+    print(f"\n  📨 Sending code to {email}…", end="", flush=True)
     r = _api_call("/api/auth/email-otp", {"action": "send", "email": email})
     if r.get("error"):
         print(f" ❌  {r['error']}")
@@ -126,7 +117,7 @@ def _get_api_key_interactive() -> str:
 
     # Ask for OTP
     for attempt in range(3):
-        otp = _input("  Enter the 6-digit code from your email: ").strip()
+        otp = _input("  🔑 Enter the 6-digit code: ").strip()
         if not otp:
             continue
         print("  Verifying…", end="", flush=True)
@@ -472,7 +463,7 @@ def _cmd_onboard(args) -> None:
     print()
 
     if choice in ('y', 'yes'):
-        print(f"  {DIM('Starting clawmetry connect...')}\n")
+        print()
         import argparse as _ap
         _fake_args = _ap.Namespace(key=None, foreground=False, custom_node_id=None)
         _cmd_connect(_fake_args)
