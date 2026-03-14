@@ -62,9 +62,24 @@ esac
 # ── Install into venv ────────────────────────────────────────────────────────
 
 echo -e "  → Creating virtual environment..."
+# Preserve config before wiping venv (contains node_id, encryption_key)
+_CM_CFG_BAK=""
+if [ -f "$INSTALL_DIR/config.json" ]; then
+  _CM_CFG_BAK=$(mktemp)
+  cp "$INSTALL_DIR/config.json" "$_CM_CFG_BAK"
+elif [ -f "$HOME/.clawmetry/config.json" ] && [ "$INSTALL_DIR" = "$HOME/.clawmetry" ]; then
+  _CM_CFG_BAK=$(mktemp)
+  cp "$HOME/.clawmetry/config.json" "$_CM_CFG_BAK"
+fi
 $USE_SUDO rm -rf "$INSTALL_DIR"
 $USE_SUDO python3 -m venv "$INSTALL_DIR"
 $USE_SUDO "$INSTALL_DIR/bin/pip" install --upgrade pip >/dev/null 2>&1
+
+# Restore config if it was backed up
+if [ -n "$_CM_CFG_BAK" ] && [ -f "$_CM_CFG_BAK" ]; then
+  $USE_SUDO cp "$_CM_CFG_BAK" "$INSTALL_DIR/config.json"
+  rm -f "$_CM_CFG_BAK"
+fi
 
 echo -e "  → Installing clawmetry from PyPI..."
 $USE_SUDO "$INSTALL_DIR/bin/pip" install --no-cache-dir clawmetry >/dev/null 2>&1
