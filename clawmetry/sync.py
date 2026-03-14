@@ -678,6 +678,34 @@ def sync_session_metadata(config: dict) -> int:
         if not session_rows:
             return 0
 
+        # Also try reading default model from sessions.json index
+        _default_model = ""
+        _idx_path = sessions_dir / "sessions.json"
+        if _idx_path.exists():
+            try:
+                with open(_idx_path) as _fi:
+                    _idx = json.load(_fi)
+                for _k, _meta in _idx.items():
+                    if isinstance(_meta, dict) and "subagent" not in _k:
+                        _m = (_meta.get("model") or "").strip()
+                        if _m:
+                            _default_model = _m
+                            break
+            except Exception:
+                pass
+
+        # Fallback: use most common model from sessions that have one
+        if not _default_model:
+            _models = [s["model"] for s in session_rows if s.get("model")]
+            if _models:
+                _default_model = max(set(_models), key=_models.count)
+
+        # Fill empty model fields with the default
+        if _default_model:
+            for s in session_rows:
+                if not s.get("model"):
+                    s["model"] = _default_model
+
         # Batch in groups of 50
         for i in range(0, len(session_rows), 50):
             batch = session_rows[i:i+50]
