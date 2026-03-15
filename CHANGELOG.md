@@ -1,3 +1,11 @@
+## [0.12.44] — 2026-03-15
+
+### Fixed
+- Sync daemon `_post()` retries once on 401/503 responses (cloud cold-start resilience)
+- Prevents sync daemon from permanently skipping sessions when Cloud Run returns transient auth errors
+
+---
+
 ## [0.12.43] — 2026-03-15
 
 ### Fixed
