@@ -10167,11 +10167,11 @@ async function loadSystemHealth() {
     var cFailed = Array.isArray(c.failed) ? c.failed : [];
     var chtml = '<div style="display:flex;gap:12px;flex-wrap:wrap;">'
       + '<div style="flex:1;min-width:100px;padding:12px 16px;background:var(--bg-secondary);border-radius:8px;text-align:center;border:1px solid var(--border-secondary);">'
-      + '<div style="font-size:24px;font-weight:700;color:var(--text-primary);">' + (c.enabled || 0) + '</div>'
-      + '<div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Enabled</div></div>'
-      + '<div style="flex:1;min-width:100px;padding:12px 16px;background:var(--bg-secondary);border-radius:8px;text-align:center;border:1px solid var(--border-secondary);">'
-      + '<div style="font-size:24px;font-weight:700;color:var(--text-success);">' + (c.ok24h || 0) + '</div>'
-      + '<div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">OK (24h)</div></div></div>';
+      + '<div style="font-size:24px;font-weight:700;color:var(--text-primary,#e6edf5);">' + (c.enabled || 0) + '</div>'
+      + '<div style="font-size:11px;color:var(--text-muted,#7c8a9d);text-transform:uppercase;letter-spacing:0.5px;">Enabled</div></div>'
+      + '<div style="flex:1;min-width:100px;padding:12px 16px;background:var(--bg-secondary,#1a1a2e);border-radius:8px;text-align:center;border:1px solid var(--border-secondary,#333);">'
+      + '<div style="font-size:24px;font-weight:700;color:var(--text-success,#22c55e);">' + (c.ok24h || 0) + '</div>'
+      + '<div style="font-size:11px;color:var(--text-muted,#7c8a9d);text-transform:uppercase;letter-spacing:0.5px;">OK (24h)</div></div></div>';
     if (cFailed.length > 0) {
       chtml += '<div style="margin-top:8px;padding:10px 14px;background:var(--bg-error);border:1px solid rgba(220,38,38,0.2);border-radius:8px;font-size:12px;color:var(--text-error);">';
       cFailed.forEach(function(f) { chtml += '<div>❌ ' + f + '</div>'; });
@@ -10184,11 +10184,11 @@ async function loadSystemHealth() {
     var pctColor = sa.successPct >= 100 ? 'var(--text-success)' : (sa.successPct > 80 ? 'var(--text-warning)' : 'var(--text-error)');
     var sahtml = '<div style="display:flex;gap:12px;flex-wrap:wrap;">'
       + '<div style="flex:1;min-width:100px;padding:12px 16px;background:var(--bg-secondary);border-radius:8px;text-align:center;border:1px solid var(--border-secondary);">'
-      + '<div style="font-size:24px;font-weight:700;color:var(--text-primary);">' + sa.runs + '</div>'
-      + '<div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Runs</div></div>'
-      + '<div style="flex:1;min-width:100px;padding:12px 16px;background:var(--bg-secondary);border-radius:8px;text-align:center;border:1px solid var(--border-secondary);">'
+      + '<div style="font-size:24px;font-weight:700;color:var(--text-primary,#e6edf5);">' + sa.runs + '</div>'
+      + '<div style="font-size:11px;color:var(--text-muted,#7c8a9d);text-transform:uppercase;letter-spacing:0.5px;">Runs</div></div>'
+      + '<div style="flex:1;min-width:100px;padding:12px 16px;background:var(--bg-secondary,#1a1a2e);border-radius:8px;text-align:center;border:1px solid var(--border-secondary,#333);">'
       + '<div style="font-size:24px;font-weight:700;color:' + pctColor + ';">' + sa.successPct + '%</div>'
-      + '<div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Success</div></div></div>';
+      + '<div style="font-size:11px;color:var(--text-muted,#7c8a9d);text-transform:uppercase;letter-spacing:0.5px;">Success</div></div></div>';
     document.getElementById('sh-subagents').innerHTML = sahtml;
 
     // Heartbeat status in system health
