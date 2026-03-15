@@ -150,7 +150,10 @@ def _verify_key_ownership(api_key: str) -> None:
         try:
             _tty = open('/dev/tty', 'r')
         except OSError:
-            pass
+            print("\n  ❌  OTP verification requires an interactive terminal.")
+            print("  Run 'clawmetry connect --key cm_xxx' from an interactive shell,")
+            print("  or use 'clawmetry onboard' for the full setup wizard.\n")
+            sys.exit(1)
 
     def _input(prompt):
         if _tty is not None:
@@ -236,8 +239,7 @@ def _cmd_connect(args) -> None:
         sys.exit(1)
 
     # Verify ownership via OTP when key is passed directly (not from interactive flow)
-    # Skip in non-interactive mode (scripts, CI, SSH) — the key itself is proof of ownership
-    if args.key and sys.stdin.isatty():
+    if args.key:
         _verify_key_ownership(api_key)
 
     custom_name = getattr(args, 'custom_node_id', None) or ''

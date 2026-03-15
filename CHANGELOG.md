@@ -1,3 +1,11 @@
+## [0.12.45] — 2026-03-15
+
+### Fixed
+- `clawmetry connect --key` no longer crashes in non-interactive shells (SSH, CI/CD, Docker)
+- Sync daemon retries on 401/503 (cloud cold-start resilience)
+
+---
+
 ## [0.12.44] — 2026-03-15
 
 ### Fixed
