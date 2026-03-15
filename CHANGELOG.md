@@ -1,3 +1,11 @@
+## [0.12.43] — 2026-03-15
+
+### Fixed
+- `sync_crons` now sends full schedule object, state (lastRunAtMs, lastDurationMs, nextRunAtMs, lastError, consecutiveFailures), and task description to cloud
+- Maps `consecutiveErrors` field (OpenClaw's actual field name) to `consecutiveFailures` for renderer compatibility
+
+---
+
 ## [0.10.11] — 2026-02-28
 
 ### Fixed
