@@ -149,11 +149,21 @@ def _post(path: str, payload: dict, api_key: str, timeout: int = 45) -> dict:
         headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code} from {url}: {e.read().decode()[:200]}")
+    last_err = None
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            code = e.code
+            msg = e.read().decode()[:200]
+            last_err = RuntimeError(f"HTTP {code} from {url}: {msg}")
+            # Retry on 401/503 (cloud cold-start transient errors)
+            if code in (401, 503) and attempt == 0:
+                time.sleep(2)
+                continue
+            raise last_err
+    raise last_err
 
 
 def get_machine_id() -> str:
