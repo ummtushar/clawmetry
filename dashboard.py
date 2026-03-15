@@ -128,9 +128,11 @@ CET = timezone(timedelta(hours=1))
 SSE_MAX_SECONDS = 300
 MAX_LOG_STREAM_CLIENTS = 10
 MAX_HEALTH_STREAM_CLIENTS = 10
+MAX_BRAIN_STREAM_CLIENTS = 5
 _stream_clients_lock = threading.Lock()
 _active_log_stream_clients = 0
 _active_health_stream_clients = 0
+_active_brain_stream_clients = 0
 EXTRA_SERVICES = []  # List of {'name': str, 'port': int} from --monitor-service flags
 
 # ── Multi-Node Fleet Configuration ─────────────────────────────────────
@@ -4411,10 +4413,12 @@ CET = timezone(timedelta(hours=1))
 SSE_MAX_SECONDS = 300
 MAX_LOG_STREAM_CLIENTS = 10
 MAX_HEALTH_STREAM_CLIENTS = 10
+MAX_BRAIN_STREAM_CLIENTS = 5
 _stream_clients_lock = threading.Lock()
 _active_log_stream_clients = 0
 _active_health_stream_clients = 0
 EXTRA_SERVICES = []  # List of {'name': str, 'port': int} from --monitor-service flags
+_active_brain_stream_clients = 0
 
 # ── Multi-Node Fleet Configuration ─────────────────────────────────────
 FLEET_API_KEY = os.environ.get("CLAWMETRY_FLEET_KEY", "")
@@ -6243,6 +6247,7 @@ DASHBOARD_HTML = r"""
   .flow-path.glow-red { stroke: #e04040; filter: drop-shadow(0 0 6px rgba(224,64,64,0.6)); }
   @keyframes brainPulse { 0%,100% { filter: drop-shadow(0 0 6px rgba(240,192,64,0.25)); } 50% { filter: drop-shadow(0 0 22px rgba(240,192,64,0.7)); } }
   .brain-group { animation: brainPulse 2.2s ease-in-out infinite; }
+  @keyframes livePulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
   .tool-indicator { opacity: 0.2; transition: opacity 0.3s ease; }
   .tool-indicator.active { opacity: 1; }
   .flow-label { font-size: 10px !important; fill: var(--text-muted) !important; font-weight: 500 !important; }
@@ -7643,7 +7648,7 @@ function clawmetryLogout(){
   <div style="padding:12px 0 8px 0;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
       <span style="font-size:14px;font-weight:700;color:var(--text-primary);">🧠 Brain -- Unified Activity Stream</span>
-      <button class="refresh-btn" onclick="loadBrainPage()">↻ Refresh</button>
+      <div style="display:flex;align-items:center;gap:8px;"><span id="brain-live-indicator"></span><button class="refresh-btn" onclick="loadBrainPage()">↻ Refresh</button></div>
     </div>
     <!-- Activity density chart -->
     <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;">
@@ -8843,6 +8848,106 @@ function renderBrainChart(events) {
   ctx.globalAlpha = 1;
 }
 
+var _brainSSE = null;
+var _brainSSEConnected = false;
+
+function _updateBrainLiveIndicator(connected) {
+  _brainSSEConnected = connected;
+  var el = document.getElementById('brain-live-indicator');
+  if (!el) return;
+  if (connected) {
+    el.innerHTML = '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,0.15);color:#22c55e;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700;"><span style="width:7px;height:7px;border-radius:50%;background:#22c55e;animation:livePulse 1.5s ease-in-out infinite;"></span> LIVE</span>';
+  } else {
+    el.innerHTML = '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(100,100,100,0.15);color:#888;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600;">● POLLING</span>';
+  }
+}
+
+function _startBrainSSE() {
+  if (_brainSSE) { try { _brainSSE.close(); } catch(e){} }
+  _brainSSE = null;
+  _brainSSEConnected = false;
+
+  try {
+    var url = '/api/brain-stream';
+    var token = localStorage.getItem('gw_token');
+    if (token) url += '?token=' + encodeURIComponent(token);
+    var es = new EventSource(url);
+    _brainSSE = es;
+
+    es.addEventListener('connected', function() {
+      _updateBrainLiveIndicator(true);
+    });
+
+    es.onmessage = function(e) {
+      try {
+        var ev = JSON.parse(e.data);
+        if (!ev || !ev.time) return;
+        // Prepend to events array
+        _brainAllEvents.unshift(ev);
+        // Cap at 500 events
+        if (_brainAllEvents.length > 500) _brainAllEvents = _brainAllEvents.slice(0, 500);
+        // Re-render with current filters
+        renderBrainStream(_brainAllEvents);
+        renderBrainChart(_brainAllEvents);
+        // Update source chips if new source
+        var known = document.querySelector('[data-source="' + ev.source + '"]');
+        if (!known && ev.source !== 'all') {
+          renderBrainFilterChips(_buildSourcesList(_brainAllEvents));
+        }
+        renderBrainTypeChips(_brainAllEvents);
+        // Flash new-event pill
+        var pill = document.getElementById('brain-new-pill');
+        var streamEl = document.getElementById('brain-stream');
+        if (pill && streamEl && streamEl.scrollTop > 60) {
+          pill.style.display = '';
+          clearTimeout(pill._hideTimer);
+          pill._hideTimer = setTimeout(function(){ pill.style.display = 'none'; }, 5000);
+        }
+      } catch(err) {}
+    };
+
+    es.onerror = function() {
+      _updateBrainLiveIndicator(false);
+      try { es.close(); } catch(e){}
+      _brainSSE = null;
+      // Fall back to polling
+      if (document.getElementById('page-brain') && document.getElementById('page-brain').classList.contains('active')) {
+        _brainRefreshTimer = setTimeout(function() { loadBrainPage(true); }, 5000);
+      }
+    };
+
+    es.addEventListener('done', function() {
+      _updateBrainLiveIndicator(false);
+      try { es.close(); } catch(e){}
+      _brainSSE = null;
+      // Reconnect after a short delay
+      if (document.getElementById('page-brain') && document.getElementById('page-brain').classList.contains('active')) {
+        setTimeout(_startBrainSSE, 2000);
+      }
+    });
+  } catch(e) {
+    _updateBrainLiveIndicator(false);
+  }
+}
+
+function _stopBrainSSE() {
+  if (_brainSSE) { try { _brainSSE.close(); } catch(e){} }
+  _brainSSE = null;
+  _updateBrainLiveIndicator(false);
+}
+
+function _buildSourcesList(events) {
+  var seen = {};
+  var sources = [];
+  events.forEach(function(ev) {
+    if (!seen[ev.source]) {
+      seen[ev.source] = true;
+      sources.push({id: ev.source, label: ev.sourceLabel || ev.source, color: ev.color || '#888'});
+    }
+  });
+  return sources;
+}
+
 async function loadBrainPage(silent) {
   if (window.CLOUD_MODE) return;
   try {
@@ -8865,8 +8970,13 @@ async function loadBrainPage(silent) {
       if (el) el.innerHTML = '<div style="color:var(--text-error);padding:20px">Failed to load: ' + escHtml(String(e)) + '</div>';
     }
   }
+  // After initial load, start SSE for live updates instead of polling
+  if (!_brainSSE && !_brainSSEConnected) {
+    _startBrainSSE();
+  }
+  // Only poll as fallback if SSE is not connected
   if (_brainRefreshTimer) clearTimeout(_brainRefreshTimer);
-  if (document.getElementById('page-brain') && document.getElementById('page-brain').classList.contains('active')) {
+  if (!_brainSSEConnected && document.getElementById('page-brain') && document.getElementById('page-brain').classList.contains('active')) {
     _brainRefreshTimer = setTimeout(function() { loadBrainPage(true); }, 5000);
   }
 }
@@ -13888,7 +13998,7 @@ _updateCloudStatus();
 
 def _acquire_stream_slot(kind):
     """Bound concurrent SSE clients per stream type."""
-    global _active_log_stream_clients, _active_health_stream_clients
+    global _active_log_stream_clients, _active_health_stream_clients, _active_brain_stream_clients
     with _stream_clients_lock:
         if kind == 'log':
             if _active_log_stream_clients >= MAX_LOG_STREAM_CLIENTS:
@@ -13900,16 +14010,23 @@ def _acquire_stream_slot(kind):
                 return False
             _active_health_stream_clients += 1
             return True
+        if kind == 'brain':
+            if _active_brain_stream_clients >= MAX_BRAIN_STREAM_CLIENTS:
+                return False
+            _active_brain_stream_clients += 1
+            return True
     return False
 
 
 def _release_stream_slot(kind):
-    global _active_log_stream_clients, _active_health_stream_clients
+    global _active_log_stream_clients, _active_health_stream_clients, _active_brain_stream_clients
     with _stream_clients_lock:
         if kind == 'log':
             _active_log_stream_clients = max(0, _active_log_stream_clients - 1)
         elif kind == 'health':
             _active_health_stream_clients = max(0, _active_health_stream_clients - 1)
+        elif kind == 'brain':
+            _active_brain_stream_clients = max(0, _active_brain_stream_clients - 1)
 
 
 # ── Gateway API proxy (WebSocket JSON-RPC + HTTP fallback) ──────────────
@@ -15279,6 +15396,273 @@ def api_brain_history():
     try: _ext_emit('brain.event', {'count': len(events)})
     except Exception: pass
     return jsonify({'events': events, 'total': len(events), 'sources': sources_seen})
+
+
+@bp_brain.route('/api/brain-stream')
+def api_brain_stream():
+    """SSE endpoint — streams real-time brain activity events.
+    Tails OpenClaw log files + all session JSONL files for new tool calls,
+    agent messages, and sub-agent activity. Emits each event as SSE data.
+    """
+    if not _acquire_stream_slot('brain'):
+        return jsonify({'error': 'Too many active brain streams'}), 429
+
+    import re as _re_bs
+    log_tool_re = _re_bs.compile(r'^\[(\w+)\]\s*(.*)', _re_bs.DOTALL)
+
+    session_dir = SESSIONS_DIR or os.path.expanduser('~/.openclaw/agents/main/sessions')
+
+    # Color assignment
+    color_palette = ['#06b6d4', '#f59e0b', '#ec4899', '#8b5cf6', '#10b981', '#f97316', '#6366f1']
+    agent_colors = {}
+    color_idx = [0]
+
+    def get_agent_color(source):
+        if source == 'main':
+            return '#a855f7'
+        if source not in agent_colors:
+            agent_colors[source] = color_palette[color_idx[0] % len(color_palette)]
+            color_idx[0] += 1
+        return agent_colors[source]
+
+    def tool_to_type(tn):
+        tn = tn.lower()
+        if tn == 'exec' or 'shell' in tn or 'bash' in tn or tn == 'process':
+            return 'EXEC'
+        if 'read' in tn:
+            return 'READ'
+        if 'write' in tn or 'edit' in tn:
+            return 'WRITE'
+        if 'browser' in tn or 'canvas' in tn or 'image' in tn:
+            return 'BROWSER'
+        if tn == 'message' or 'tts' in tn:
+            return 'MSG'
+        if 'web_search' in tn or 'web_fetch' in tn or 'search' in tn:
+            return 'SEARCH'
+        if 'subagent' in tn or 'spawn' in tn:
+            return 'SPAWN'
+        return 'TOOL'
+
+    def extract_detail(tn, inp):
+        tn = tn.lower()
+        if not isinstance(inp, dict):
+            return str(inp)[:300]
+        if tn == 'exec' or 'shell' in tn or 'bash' in tn or tn == 'process':
+            return (inp.get('command') or inp.get('action') or '')[:300]
+        if 'read' in tn:
+            return (inp.get('path') or inp.get('file_path') or '')[:300]
+        if 'write' in tn or 'edit' in tn:
+            return (inp.get('path') or inp.get('file_path') or '')[:300]
+        if 'browser' in tn:
+            return (inp.get('url') or inp.get('targetUrl') or inp.get('action') or '')[:300]
+        if tn == 'message':
+            return (inp.get('message') or inp.get('target') or '')[:300]
+        if 'search' in tn or 'fetch' in tn:
+            return (inp.get('query') or inp.get('url') or '')[:300]
+        if 'subagent' in tn or 'spawn' in tn:
+            return (inp.get('label') or str(inp.get('message', '')))[:300]
+        vals = list(inp.values())
+        return (str(vals[0]) if vals else '')[:300]
+
+    def _parse_jsonl_event(obj, source_id, source_label, color):
+        """Parse a JSONL line into a brain event dict, or return None."""
+        ts = obj.get('timestamp') or obj.get('time')
+        if not ts:
+            return None
+        role = obj.get('role', '')
+        content_obj = obj.get('content', '')
+        if obj.get('type') == 'message':
+            inner = obj.get('message', {})
+            role = inner.get('role', '')
+            content_obj = inner.get('content', [])
+
+        if role == 'assistant' and isinstance(content_obj, list):
+            for block in content_obj:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get('type', '')
+                if btype == 'thinking':
+                    thinking_text = block.get('thinking', '')
+                    if thinking_text:
+                        return {'time': ts, 'source': source_id, 'sourceLabel': source_label,
+                                'type': 'THINK', 'detail': thinking_text[:300], 'color': color}
+                if btype == 'text':
+                    text = block.get('text', '')
+                    if text:
+                        return {'time': ts, 'source': source_id, 'sourceLabel': source_label,
+                                'type': 'AGENT', 'detail': text[:300], 'color': color}
+                if btype == 'tool_use':
+                    tool_name = block.get('name', '')
+                    inp = block.get('input', {})
+                elif btype == 'toolCall':
+                    tool_name = block.get('name', '')
+                    inp = block.get('arguments', {})
+                else:
+                    continue
+                if tool_name:
+                    return {'time': ts, 'source': source_id, 'sourceLabel': source_label,
+                            'type': tool_to_type(tool_name), 'detail': extract_detail(tool_name, inp),
+                            'color': color}
+        if role == 'user':
+            text = ''
+            if isinstance(content_obj, str):
+                text = content_obj
+            elif isinstance(content_obj, list):
+                parts = [b.get('text', '') for b in content_obj if isinstance(b, dict) and b.get('type') == 'text']
+                text = ' '.join(parts)
+            if text:
+                return {'time': ts, 'source': source_id, 'sourceLabel': source_label,
+                        'type': 'USER', 'detail': text[:300], 'color': color}
+        return None
+
+    # Build session label map
+    index_path = os.path.join(session_dir, 'sessions.json')
+    sid_to_label = {}
+    try:
+        with open(index_path, 'r') as f:
+            index = json.load(f)
+        for key, meta in index.items():
+            sid = meta.get('sessionId', '')
+            label = meta.get('displayName') or meta.get('label') or ''
+            if sid and label:
+                sid_to_label[sid] = label
+    except Exception:
+        pass
+
+    def generate():
+        started = time.time()
+
+        # Track file positions for tailing
+        log_dirs = _get_log_dirs()
+        log_files = []
+        for d in log_dirs:
+            log_files += sorted(glob.glob(os.path.join(d, 'openclaw-*.log')))
+        log_files += sorted(glob.glob('/tmp/openclaw/openclaw-*.log'))
+        log_files = list(dict.fromkeys(log_files))
+
+        # Seek to end of all files
+        log_positions = {}
+        for lf in log_files[-3:]:
+            try:
+                with open(lf, 'rb') as f:
+                    f.seek(0, 2)
+                    log_positions[lf] = f.tell()
+            except Exception:
+                pass
+
+        jsonl_positions = {}
+        jsonl_files = sorted(glob.glob(os.path.join(session_dir, '*.jsonl'))) if os.path.isdir(session_dir) else []
+        for jf in jsonl_files:
+            try:
+                with open(jf, 'rb') as f:
+                    f.seek(0, 2)
+                    jsonl_positions[jf] = f.tell()
+            except Exception:
+                pass
+
+        last_jsonl_scan = time.time()
+
+        try:
+            # Send initial heartbeat
+            yield 'event: connected\ndata: {"status":"live"}\n\n'
+
+            while True:
+                if time.time() - started > SSE_MAX_SECONDS:
+                    yield 'event: done\ndata: {"reason":"max_duration"}\n\n'
+                    break
+
+                events = []
+
+                # Tail log files for main agent events
+                for lf in list(log_positions.keys()):
+                    try:
+                        with open(lf, 'rb') as f:
+                            f.seek(log_positions[lf])
+                            data = f.read()
+                            log_positions[lf] = f.tell()
+                        for line in data.decode('utf-8', errors='replace').splitlines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                            except Exception:
+                                continue
+                            ts = obj.get('time') or obj.get('timestamp')
+                            if not ts:
+                                continue
+                            msg = obj.get('0') or obj.get('message') or ''
+                            if isinstance(msg, dict):
+                                msg = json.dumps(msg)
+                            m = log_tool_re.match(msg.strip())
+                            if m:
+                                tool_kw = m.group(1).lower()
+                                rest = m.group(2).strip()
+                                ev_type = tool_to_type(tool_kw)
+                                detail = rest.split('\n')[0][:300]
+                                events.append({'time': ts, 'source': 'main', 'sourceLabel': 'main',
+                                               'type': ev_type, 'detail': detail, 'color': '#a855f7'})
+                    except Exception:
+                        pass
+
+                # Tail session JSONL files for sub-agent events
+                for jf in list(jsonl_positions.keys()):
+                    try:
+                        with open(jf, 'rb') as f:
+                            f.seek(jsonl_positions[jf])
+                            data = f.read()
+                            jsonl_positions[jf] = f.tell()
+                        if not data:
+                            continue
+                        fname = os.path.basename(jf).replace('.jsonl', '')
+                        label = sid_to_label.get(fname, '')
+                        source_label = label if label else ('agent:' + fname[:8] if _re_bs.match(r'[0-9a-f-]{36}', fname) else fname)
+                        color = get_agent_color(fname)
+                        for line in data.decode('utf-8', errors='replace').splitlines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                                ev = _parse_jsonl_event(obj, fname, source_label, color)
+                                if ev:
+                                    events.append(ev)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                # Periodically check for new JSONL files (new sub-agents)
+                now = time.time()
+                if now - last_jsonl_scan > 10:
+                    new_files = sorted(glob.glob(os.path.join(session_dir, '*.jsonl'))) if os.path.isdir(session_dir) else []
+                    for nf in new_files:
+                        if nf not in jsonl_positions:
+                            try:
+                                with open(nf, 'rb') as f:
+                                    f.seek(0, 2)
+                                    jsonl_positions[nf] = f.tell()
+                            except Exception:
+                                pass
+                    last_jsonl_scan = now
+
+                # Emit events
+                for ev in events:
+                    yield f'data: {json.dumps(ev)}\n\n'
+
+                # Heartbeat every cycle to keep connection alive
+                if not events:
+                    yield ':\n\n'
+
+                time.sleep(0.5)
+        except GeneratorExit:
+            pass
+        finally:
+            _release_stream_slot('brain')
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
 
 @bp_logs.route('/api/flow-events')
 def api_flow_events():

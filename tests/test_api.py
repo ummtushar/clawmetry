@@ -317,3 +317,44 @@ class TestSecurity:
         d = assert_ok(get(api, base_url, "/api/security/threats"))
         for t in d["threats"][:5]:  # check first 5
             assert_keys(t, "rule_id", "severity", "description", "detail", "time")
+
+
+# ---------------------------------------------------------------------------
+# Brain Activity
+# ---------------------------------------------------------------------------
+
+class TestBrainActivity:
+    def test_brain_history_structure(self, api, base_url):
+        """Brain history endpoint returns events, total, and sources."""
+        d = assert_ok(get(api, base_url, "/api/brain-history"))
+        assert_keys(d, "events", "total", "sources")
+        assert isinstance(d["events"], list)
+        assert isinstance(d["sources"], list)
+        assert isinstance(d["total"], int)
+
+    def test_brain_history_event_fields(self, api, base_url):
+        """Brain events have required fields: time, source, type, detail."""
+        d = assert_ok(get(api, base_url, "/api/brain-history"))
+        for ev in d["events"][:10]:
+            assert_keys(ev, "time", "source", "type", "detail", "color")
+
+    def test_brain_history_sources_fields(self, api, base_url):
+        """Source entries have id, label, color."""
+        d = assert_ok(get(api, base_url, "/api/brain-history"))
+        for s in d["sources"][:5]:
+            assert_keys(s, "id", "label", "color")
+
+    def test_brain_stream_sse_endpoint(self, api, base_url):
+        """Brain stream SSE endpoint returns text/event-stream."""
+        r = api.get(f"{base_url}/api/brain-stream", stream=True, timeout=5)
+        assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+        ct = r.headers.get("Content-Type", "")
+        assert "text/event-stream" in ct, f"Expected text/event-stream, got {ct}"
+        # Read initial connected event
+        first_chunk = b""
+        for chunk in r.iter_content(chunk_size=256):
+            first_chunk += chunk
+            if b"connected" in first_chunk or len(first_chunk) > 512:
+                break
+        r.close()
+        assert b"connected" in first_chunk or b"data:" in first_chunk or b":\n" in first_chunk
