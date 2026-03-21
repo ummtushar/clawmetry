@@ -30,7 +30,7 @@ if sys.platform == 'win32':
 import glob
 import json
 import socket
-from collections import deque
+from collections import deque, defaultdict
 import argparse
 import subprocess
 import time
@@ -146,6 +146,8 @@ _budget_paused_at = 0
 _budget_paused_reason = ''
 _budget_alert_cooldowns = {}  # rule_id -> last_fired_timestamp
 _AGENT_DOWN_SECONDS = 300  # 5 min with no OTLP data = agent down alert
+_ALERTS_CONFIG_FILE = os.path.expanduser('~/.openclaw/clawmetry-alerts.json')
+_security_posture_hash = ''
 
 # ── OTLP Metrics Store ─────────────────────────────────────────────────
 METRICS_FILE = None  # Set via CLI/env, defaults to {WORKSPACE}/.clawmetry-metrics.json
@@ -477,6 +479,72 @@ def _set_budget_config(updates):
         db.close()
 
 
+def _default_alerts_webhook_config():
+    return {
+        'webhook_url': '',
+        'slack_webhook_url': '',
+        'discord_webhook_url': '',
+        'cost_spike_alerts': True,
+        'agent_error_rate_alerts': True,
+        'security_posture_changes': True,
+    }
+
+
+def _load_alerts_webhook_config():
+    cfg = _default_alerts_webhook_config()
+    try:
+        if os.path.exists(_ALERTS_CONFIG_FILE):
+            with open(_ALERTS_CONFIG_FILE, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k in cfg:
+                    if k in data:
+                        cfg[k] = data[k]
+    except Exception:
+        pass
+    return cfg
+
+
+def _save_alerts_webhook_config(updates):
+    cfg = _load_alerts_webhook_config()
+    for k in cfg:
+        if k in updates:
+            cfg[k] = updates[k]
+    try:
+        os.makedirs(os.path.dirname(_ALERTS_CONFIG_FILE), exist_ok=True)
+        with open(_ALERTS_CONFIG_FILE, 'w') as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
+    return cfg
+
+
+def _should_send_webhook_for_type(alert_type):
+    cfg = _load_alerts_webhook_config()
+    if alert_type in ('cost_spike', 'daily_threshold_breached', 'weekly_threshold_breached'):
+        return bool(cfg.get('cost_spike_alerts', True))
+    if alert_type == 'agent_error_rate':
+        return bool(cfg.get('agent_error_rate_alerts', True))
+    if alert_type == 'security_posture_change':
+        return bool(cfg.get('security_posture_changes', True))
+    return True
+
+
+def _dispatch_configured_webhooks(alert_type, payload):
+    if not _should_send_webhook_for_type(alert_type):
+        return
+    cfg = _load_alerts_webhook_config()
+    generic_url = str(cfg.get('webhook_url', '')).strip()
+    slack_url = str(cfg.get('slack_webhook_url', '')).strip()
+    discord_url = str(cfg.get('discord_webhook_url', '')).strip()
+    if generic_url:
+        _send_webhook_alert(generic_url, payload, payload_type='generic')
+    if slack_url:
+        _send_webhook_alert(slack_url, payload, payload_type='slack')
+    if discord_url:
+        _send_webhook_alert(discord_url, payload, payload_type='discord')
+
+
 def _get_budget_status():
     """Calculate current spending vs budget limits."""
     global _budget_paused, _budget_paused_at, _budget_paused_reason
@@ -529,6 +597,7 @@ def _budget_check():
     global _budget_paused, _budget_paused_at, _budget_paused_reason
     if _budget_paused:
         return
+    now = time.time()
     config = _get_budget_config()
     status = _get_budget_status()
     warning_pct = config['warning_threshold_pct']
@@ -541,6 +610,20 @@ def _budget_check():
             continue
         spent = status[f'{period}_spent']
         pct = (spent / limit * 100) if limit > 0 else 0
+
+        if period in ('daily', 'weekly') and spent >= limit:
+            rule_id = f'webhook_{period}_threshold_breached'
+            last_fired = _budget_alert_cooldowns.get(rule_id, 0)
+            if now - last_fired >= 900:
+                _budget_alert_cooldowns[rule_id] = now
+                _dispatch_configured_webhooks(f'{period}_threshold_breached', {
+                    'type': f'{period}_threshold_breached',
+                    'agent': 'main',
+                    'cost_usd': round(spent, 4),
+                    'threshold': round(limit, 4),
+                    'timestamp': now,
+                    'message': f'{period.capitalize()} cost threshold breached: ${spent:.2f} / ${limit:.2f}',
+                })
 
         # Warning alert
         if pct >= warning_pct and pct < pause_pct:
@@ -685,11 +768,19 @@ def _send_telegram_alert(message):
         pass
 
 
-def _send_webhook_alert(url, alert_data):
-    """Send alert to a webhook URL."""
+def _send_webhook_alert(url, alert_data, payload_type='generic'):
+    """Send alert to a webhook URL (generic JSON, Slack, or Discord)."""
     try:
         import urllib.request as _ur
-        payload = json.dumps(alert_data).encode()
+        if payload_type == 'discord':
+            content = alert_data.get('message') or f"[{alert_data.get('type', 'alert')}] cost=${alert_data.get('cost_usd', 0)} threshold=${alert_data.get('threshold', 0)}"
+            body = {'content': content}
+        elif payload_type == 'slack':
+            text = alert_data.get('message') or f"[{alert_data.get('type', 'alert')}] cost=${alert_data.get('cost_usd', 0)} threshold=${alert_data.get('threshold', 0)}"
+            body = {'text': text}
+        else:
+            body = alert_data
+        payload = json.dumps(body).encode()
         req = _ur.Request(url, data=payload, headers={'Content-Type': 'application/json'}, method='POST')
         _ur.urlopen(req, timeout=10)
     except Exception:
@@ -742,7 +833,7 @@ def _get_active_alerts():
 
 def _budget_monitor_loop():
     """Background thread: check for anomalies, agent-down, and custom alert rules."""
-    global _budget_alert_cooldowns
+    global _budget_alert_cooldowns, _security_posture_hash
     while True:
         time.sleep(60)
         try:
@@ -763,12 +854,70 @@ def _budget_monitor_loop():
             if daily_spent > 0:
                 week_avg = status['weekly_spent'] / 7 if status['weekly_spent'] > 0 else 0
                 if week_avg > 0 and daily_spent > week_avg * 2:
+                    ratio = (daily_spent / week_avg)
                     _fire_alert(
                         rule_id='anomaly_daily',
                         alert_type='anomaly',
-                        message=f'Spending anomaly: today ${daily_spent:.2f} is {(daily_spent/week_avg):.1f}x the 7-day average (${week_avg:.2f}/day)',
+                        message=f'Spending anomaly: today ${daily_spent:.2f} is {ratio:.1f}x the 7-day average (${week_avg:.2f}/day)',
                         channels=['banner', 'telegram'],
                     )
+                    _dispatch_configured_webhooks('cost_spike', {
+                        'type': 'cost_spike',
+                        'agent': 'main',
+                        'cost_usd': round(daily_spent, 4),
+                        'threshold': round(week_avg * 2, 4),
+                        'timestamp': now,
+                        'message': f'Cost spike detected: {ratio:.1f}x daily average',
+                    })
+
+            # Agent error-rate check from webhook channel metrics (last 60 minutes)
+            window_start = now - 3600
+            total_wh = 0
+            error_wh = 0
+            with _metrics_lock:
+                for e in metrics_store.get('webhooks', []):
+                    ts = e.get('timestamp', 0)
+                    if ts < window_start:
+                        continue
+                    total_wh += 1
+                    et = str(e.get('type', '')).lower()
+                    if et.endswith('.error') or 'error' in et:
+                        error_wh += 1
+            if total_wh >= 10:
+                error_rate = (error_wh / total_wh) * 100.0
+                if error_rate >= 20.0:
+                    rule_id = 'agent_error_rate_high'
+                    last_fired = _budget_alert_cooldowns.get(rule_id, 0)
+                    if now - last_fired >= 1800:
+                        _budget_alert_cooldowns[rule_id] = now
+                        msg = f'Agent error rate high: {error_rate:.1f}% ({error_wh}/{total_wh}) in the last hour'
+                        _fire_alert(rule_id=rule_id, alert_type='agent_error_rate', message=msg, channels=['banner', 'telegram'])
+                        _dispatch_configured_webhooks('agent_error_rate', {
+                            'type': 'agent_error_rate',
+                            'agent': 'main',
+                            'cost_usd': round(status.get('daily_spent', 0), 4),
+                            'threshold': 20.0,
+                            'timestamp': now,
+                            'message': msg,
+                        })
+
+            # Security posture change check
+            posture = _detect_security_metadata() or {}
+            posture_hash = json.dumps(posture, sort_keys=True)
+            if not _security_posture_hash:
+                _security_posture_hash = posture_hash
+            elif posture_hash != _security_posture_hash:
+                _security_posture_hash = posture_hash
+                msg = 'Security posture changed (sandbox/auth/network settings updated)'
+                _fire_alert(rule_id='security_posture_change', alert_type='security', message=msg, channels=['banner', 'telegram'])
+                _dispatch_configured_webhooks('security_posture_change', {
+                    'type': 'security_posture_change',
+                    'agent': 'main',
+                    'cost_usd': round(status.get('daily_spent', 0), 4),
+                    'threshold': 0,
+                    'timestamp': now,
+                    'message': msg,
+                })
 
             # Custom alert rules
             rules = _get_alert_rules()
@@ -1583,6 +1732,11 @@ DASHBOARD_HTML = r"""
   .badge-error { background:rgba(239,68,68,0.2); color:#ef4444; }
   .badge-tool { background:rgba(148,163,184,0.2); color:#94a3b8; }
   .brain-detail { color:var(--text-secondary); flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; word-break:break-all; }
+  .brain-view-toggle { display:flex; gap:6px; margin-bottom:12px; }
+  .brain-view-btn { padding:4px 12px; border-radius:10px; border:1px solid var(--border); background:transparent; color:var(--text-muted); font-size:11px; font-weight:600; cursor:pointer; }
+  .brain-view-btn.active { border-color:#a855f7; background:rgba(168,85,247,0.2); color:#a855f7; }
+  .brain-graph-container { width:100%; height:500px; background:var(--bg-secondary); border-radius:8px; border:1px solid var(--border); overflow:hidden; }
+  #brain-graph-canvas { width:100%; height:500px; display:block; }
     .nav-tab { padding: 8px 16px; border-radius: 8px; background: transparent; border: 1px solid transparent; color: var(--text-tertiary); cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; transition: all 0.2s ease; position: relative; }
   .nav-tab:hover { background: var(--bg-hover); color: var(--text-secondary); }
   .nav-tab.active { background: var(--bg-accent); color: #ffffff; border-color: var(--bg-accent); }
@@ -1655,6 +1809,7 @@ DASHBOARD_HTML = r"""
   .session-name { font-weight: 600; font-size: 14px; color: var(--text-primary); }
   .session-meta { font-size: 12px; color: var(--text-muted); margin-top: 4px; display: flex; gap: 12px; flex-wrap: wrap; }
   .session-meta span { display: flex; align-items: center; gap: 4px; }
+  .session-anomaly { color: #f59e0b; font-size: 14px; margin-left: 6px; cursor: help; }
 
   .cron-item { padding: 12px; border-bottom: 1px solid var(--border-secondary); }
   .cron-item:last-child { border-bottom: none; }
@@ -2656,6 +2811,24 @@ function clawmetryLogout(){
           </div>
         </div>
       </div>
+      <div style="padding:12px;background:var(--bg-secondary);border:1px solid var(--border-primary);border-radius:8px;margin-bottom:12px;">
+        <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px;">Configure Alerts</div>
+        <div style="display:grid;gap:8px;">
+          <input id="alert-webhook-url" type="text" placeholder="Generic webhook URL (JSON payload)" style="padding:8px;border:1px solid var(--border-primary);border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);">
+          <input id="alert-slack-url" type="text" placeholder="Slack incoming webhook URL" style="padding:8px;border:1px solid var(--border-primary);border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);">
+          <input id="alert-discord-url" type="text" placeholder="Discord webhook URL" style="padding:8px;border:1px solid var(--border-primary);border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;">
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="alert-toggle-cost-spike"> Cost spike alerts</label>
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="alert-toggle-agent-error"> Agent error rate alerts</label>
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="alert-toggle-security"> Security posture changes</label>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button onclick="saveWebhookConfig()" style="background:var(--bg-accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;">Save</button>
+            <button onclick="testWebhookConfig('all')" style="background:#16a34a;color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;">Test</button>
+            <span id="alert-webhook-status" style="font-size:12px;color:var(--text-muted);display:flex;align-items:center;"></span>
+          </div>
+        </div>
+      </div>
       <div id="alert-rules-list" style="font-size:13px;color:var(--text-secondary);">Loading...</div>
     </div>
     <!-- Telegram Tab -->
@@ -3289,12 +3462,16 @@ function clawmetryLogout(){
       <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Activity density -- last 60 min (30s buckets)</div>
       <canvas id="brain-density-chart" height="60" style="width:100%;display:block;"></canvas>
     </div>
+    <div class="brain-view-toggle">
+      <button id="brain-view-list-btn" class="brain-view-btn active" onclick="setBrainViewMode('list',this)">List</button>
+      <button id="brain-view-graph-btn" class="brain-view-btn" onclick="setBrainViewMode('graph',this)">Graph</button>
+    </div>
     <!-- Source filter chips -->
     <div id="brain-filter-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
       <button class="brain-chip active" data-source="all" onclick="setBrainFilter('all',this)" style="padding:3px 10px;border-radius:12px;border:1px solid #a855f7;background:rgba(168,85,247,0.2);color:#a855f7;font-size:11px;cursor:pointer;font-weight:600;">All</button>
     </div>
     <!-- Event stream -->
-    <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:10px 14px;">
+    <div id="brain-feed" style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:10px 14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <span style="font-size:11px;color:var(--text-muted);">Live event stream (newest first)</span>
         <span id="brain-new-pill" style="display:none;background:#a855f7;color:#fff;border-radius:10px;padding:1px 8px;font-size:10px;font-weight:700;cursor:pointer;" onclick="scrollBrainToTop()">↑ new events</span>
@@ -3302,6 +3479,9 @@ function clawmetryLogout(){
       <div id="brain-stream" style="max-height:600px;overflow-y:auto;">
         <div style="color:var(--text-muted);padding:20px">Loading...</div>
       </div>
+    </div>
+    <div id="brain-graph-wrap" class="brain-graph-container" style="display:none;">
+      <canvas id="brain-graph-canvas"></canvas>
     </div>
   </div>
 </div><!-- end page-brain -->
@@ -3487,7 +3667,7 @@ function switchBudgetTab(tab, el) {
     var d = document.getElementById('budget-tab-'+t);
     if(d) d.style.display = t===tab ? 'block' : 'none';
   });
-  if(tab==='alerts') loadAlertRules();
+  if(tab==='alerts') { loadAlertRules(); loadWebhookConfig(); }
   if(tab==='telegram') loadTelegramConfig();
   if(tab==='history') loadAlertHistory();
 }
@@ -3594,6 +3774,69 @@ async function loadAlertRules() {
 async function deleteAlertRule(id) {
   await fetch('/api/alerts/rules/'+id, {method:'DELETE'});
   loadAlertRules();
+}
+
+async function loadWebhookConfig() {
+  try {
+    var cfg = await fetch('/api/alerts/webhook').then(function(r){return r.json();});
+    document.getElementById('alert-webhook-url').value = cfg.webhook_url || '';
+    document.getElementById('alert-slack-url').value = cfg.slack_webhook_url || '';
+    document.getElementById('alert-discord-url').value = cfg.discord_webhook_url || '';
+    document.getElementById('alert-toggle-cost-spike').checked = cfg.cost_spike_alerts !== false;
+    document.getElementById('alert-toggle-agent-error').checked = cfg.agent_error_rate_alerts !== false;
+    document.getElementById('alert-toggle-security').checked = cfg.security_posture_changes !== false;
+    document.getElementById('alert-webhook-status').textContent = '';
+  } catch(e) {}
+}
+
+async function saveWebhookConfig() {
+  var status = document.getElementById('alert-webhook-status');
+  status.textContent = 'Saving...';
+  var payload = {
+    webhook_url: document.getElementById('alert-webhook-url').value.trim(),
+    slack_webhook_url: document.getElementById('alert-slack-url').value.trim(),
+    discord_webhook_url: document.getElementById('alert-discord-url').value.trim(),
+    cost_spike_alerts: document.getElementById('alert-toggle-cost-spike').checked,
+    agent_error_rate_alerts: document.getElementById('alert-toggle-agent-error').checked,
+    security_posture_changes: document.getElementById('alert-toggle-security').checked,
+  };
+  try {
+    var r = await fetch('/api/alerts/webhook', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    if (!r.ok) throw new Error('Save failed');
+    status.style.color = 'var(--text-success)';
+    status.textContent = 'Saved';
+  } catch(e) {
+    status.style.color = 'var(--text-error)';
+    status.textContent = 'Save failed';
+  }
+}
+
+async function testWebhookConfig(target) {
+  var status = document.getElementById('alert-webhook-status');
+  status.style.color = 'var(--text-muted)';
+  status.textContent = 'Sending test...';
+  try {
+    var r = await fetch('/api/alerts/webhook/test', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({target: target || 'all'})
+    });
+    var data = await r.json();
+    if(data.ok) {
+      status.style.color = 'var(--text-success)';
+      status.textContent = 'Test sent to: ' + (data.sent || []).join(', ');
+    } else {
+      status.style.color = 'var(--text-error)';
+      status.textContent = data.error || 'Test failed';
+    }
+  } catch(e) {
+    status.style.color = 'var(--text-error)';
+    status.textContent = 'Test failed';
+  }
 }
 
 async function loadAlertHistory() {
@@ -4353,6 +4596,306 @@ function renderBrainDetail(detail) {
 var _brainFilter = 'all';
 var _brainTypeFilter = 'all';
 var _brainAllEvents = [];
+var _brainViewMode = 'list';
+var _brainGraph = {
+  canvas: null,
+  ctx: null,
+  width: 0,
+  height: 500,
+  dpr: 1,
+  lastTs: 0,
+  rafId: 0,
+  animating: false,
+  agents: {},
+  agentOrder: [],
+  events: [],
+  lastPulseAt: 0
+};
+var _brainGraphResizeBound = false;
+
+function _brainGraphHash(str) {
+  var h = 2166136261;
+  str = String(str || '');
+  for (var i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+  }
+  return h >>> 0;
+}
+
+function _brainGraphEnsureCanvas() {
+  var canvas = document.getElementById('brain-graph-canvas');
+  if (!canvas) return false;
+  if (!_brainGraph.canvas) {
+    _brainGraph.canvas = canvas;
+    _brainGraph.ctx = canvas.getContext('2d');
+  }
+  var rect = canvas.getBoundingClientRect();
+  var dpr = Math.max(1, window.devicePixelRatio || 1);
+  var w = Math.max(320, Math.floor(rect.width || canvas.clientWidth || 800));
+  var h = 500;
+  if (canvas.width !== Math.floor(w * dpr) || canvas.height !== Math.floor(h * dpr)) {
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+  }
+  _brainGraph.dpr = dpr;
+  _brainGraph.width = w;
+  _brainGraph.height = h;
+  return true;
+}
+
+function setBrainViewMode(mode, btn) {
+  _brainViewMode = mode === 'graph' ? 'graph' : 'list';
+  var feed = document.getElementById('brain-feed');
+  var graphWrap = document.getElementById('brain-graph-wrap');
+  var graphCanvas = document.getElementById('brain-graph-canvas');
+  var listBtn = document.getElementById('brain-view-list-btn');
+  var graphBtn = document.getElementById('brain-view-graph-btn');
+  if (listBtn) listBtn.classList.toggle('active', _brainViewMode === 'list');
+  if (graphBtn) graphBtn.classList.toggle('active', _brainViewMode === 'graph');
+  if (feed) feed.style.display = _brainViewMode === 'graph' ? 'none' : '';
+  if (graphWrap) graphWrap.style.display = _brainViewMode === 'graph' ? '' : 'none';
+  if (graphCanvas) graphCanvas.style.display = _brainViewMode === 'graph' ? 'block' : 'none';
+  if (_brainViewMode === 'graph') {
+    _brainGraphEnsureCanvas();
+    syncBrainGraph(_brainAllEvents);
+    _startBrainGraphLoop();
+    if (!_brainGraphResizeBound) {
+      _brainGraphResizeBound = true;
+      window.addEventListener('resize', function() {
+        if (_brainViewMode === 'graph') _brainGraphEnsureCanvas();
+      });
+    }
+  }
+}
+
+function syncBrainGraph(events) {
+  events = Array.isArray(events) ? events : [];
+  var oldAgents = _brainGraph.agents || {};
+  var oldEvents = {};
+  (_brainGraph.events || []).forEach(function(node) { oldEvents[node.id] = node; });
+  var now = Date.now();
+  var centerX = (_brainGraph.width || 900) / 2;
+  var centerY = (_brainGraph.height || 500) / 2;
+  var recent = events.slice(0, 200);
+  var agentMap = {};
+  recent.forEach(function(ev) {
+    var source = ev && ev.source ? ev.source : 'main';
+    if (!agentMap[source]) {
+      agentMap[source] = {
+        id: source,
+        label: ev && ev.sourceLabel ? ev.sourceLabel : source,
+        lastSeen: 0,
+        count: 0
+      };
+    }
+    var ts = ev && ev.time ? (new Date(ev.time).getTime() || 0) : 0;
+    if (ts > agentMap[source].lastSeen) agentMap[source].lastSeen = ts;
+    agentMap[source].count++;
+  });
+  if (!agentMap.main && recent.length) {
+    agentMap.main = {id: 'main', label: 'main', lastSeen: now, count: 1};
+  }
+  var agentIds = Object.keys(agentMap).sort(function(a, b) {
+    var da = agentMap[a], db = agentMap[b];
+    if (db.lastSeen !== da.lastSeen) return db.lastSeen - da.lastSeen;
+    return db.count - da.count;
+  }).slice(0, 20);
+  var chosen = {};
+  agentIds.forEach(function(id) { chosen[id] = true; });
+  var nextAgents = {};
+  var ringR = Math.max(90, Math.min(180, Math.min(centerX, centerY) - 40));
+  agentIds.forEach(function(id, i) {
+    var baseAngle = (Math.PI * 2 * i) / Math.max(1, agentIds.length);
+    var prev = oldAgents[id];
+    nextAgents[id] = {
+      id: id,
+      label: agentMap[id].label || id,
+      lastSeen: agentMap[id].lastSeen || 0,
+      x: prev ? prev.x : centerX + Math.cos(baseAngle) * ringR,
+      y: prev ? prev.y : centerY + Math.sin(baseAngle) * ringR,
+      vx: prev ? prev.vx : 0,
+      vy: prev ? prev.vy : 0,
+      r: 14
+    };
+  });
+  var nextEvents = [];
+  for (var ei = 0; ei < events.length && nextEvents.length < 50; ei++) {
+    var ev = events[ei];
+    var source = ev && ev.source ? ev.source : 'main';
+    if (!chosen[source]) continue;
+    var key = (ev.time || '') + '|' + source + '|' + (ev.type || '') + '|' + (ev.detail || '');
+    var id = 'ev:' + _brainGraphHash(key).toString(16);
+    var prevNode = oldEvents[id];
+    var agent = nextAgents[source];
+    var seed = _brainGraphHash(id);
+    var angle = ((seed % 6283) / 1000);
+    nextEvents.push({
+      id: id,
+      source: source,
+      type: ev.type || 'TOOL',
+      color: ev.color || brainSourceColor(source),
+      x: prevNode ? prevNode.x : (agent.x + Math.cos(angle) * 42),
+      y: prevNode ? prevNode.y : (agent.y + Math.sin(angle) * 42),
+      vx: prevNode ? prevNode.vx : 0,
+      vy: prevNode ? prevNode.vy : 0,
+      orbitR: 34 + (seed % 24),
+      orbitSpeed: 0.00025 + ((seed % 100) / 500000),
+      orbitPhase: angle,
+      r: 4
+    });
+  }
+  _brainGraph.agents = nextAgents;
+  _brainGraph.agentOrder = agentIds;
+  _brainGraph.events = nextEvents;
+}
+
+function _startBrainGraphLoop() {
+  if (_brainGraph.animating) return;
+  _brainGraph.animating = true;
+  _brainGraph.lastTs = 0;
+  _brainGraph.rafId = requestAnimationFrame(_brainGraphTick);
+}
+
+function _brainGraphTick(ts) {
+  _brainGraph.rafId = requestAnimationFrame(_brainGraphTick);
+  if (_brainViewMode !== 'graph') return;
+  if (!document.getElementById('page-brain') || !document.getElementById('page-brain').classList.contains('active')) return;
+  if (!_brainGraphEnsureCanvas()) return;
+  var dt = _brainGraph.lastTs ? Math.min(33, ts - _brainGraph.lastTs) / 16.67 : 1;
+  _brainGraph.lastTs = ts;
+  var now = Date.now();
+  var agents = _brainGraph.agentOrder.map(function(id) { return _brainGraph.agents[id]; }).filter(Boolean);
+  var events = _brainGraph.events;
+  var W = _brainGraph.width;
+  var H = _brainGraph.height;
+  var cx = W / 2;
+  var cy = H / 2;
+  agents.forEach(function(a) {
+    var dx = cx - a.x;
+    var dy = cy - a.y;
+    a.vx += dx * 0.0007 * dt;
+    a.vy += dy * 0.0007 * dt;
+  });
+  for (var i = 0; i < agents.length; i++) {
+    for (var j = i + 1; j < agents.length; j++) {
+      var a = agents[i], b = agents[j];
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var d2 = dx * dx + dy * dy + 0.01;
+      var d = Math.sqrt(d2);
+      var force = Math.min(6, 900 / d2);
+      var fx = (dx / d) * force;
+      var fy = (dy / d) * force;
+      a.vx -= fx * dt; a.vy -= fy * dt;
+      b.vx += fx * dt; b.vy += fy * dt;
+    }
+  }
+  if (ts - _brainGraph.lastPulseAt > 2000) {
+    agents.forEach(function(a) {
+      if (now - a.lastSeen < 90000) {
+        if (!a.pulses) a.pulses = [];
+        a.pulses.push({start: ts});
+      }
+    });
+    _brainGraph.lastPulseAt = ts;
+  }
+  agents.forEach(function(a) {
+    a.vx *= 0.9; a.vy *= 0.9;
+    a.x += a.vx * dt;
+    a.y += a.vy * dt;
+    a.x = Math.max(24, Math.min(W - 24, a.x));
+    a.y = Math.max(24, Math.min(H - 24, a.y));
+  });
+  events.forEach(function(ev, idx) {
+    var agent = _brainGraph.agents[ev.source];
+    if (!agent) return;
+    var orbitA = ev.orbitPhase + ts * ev.orbitSpeed;
+    var tx = agent.x + Math.cos(orbitA) * ev.orbitR;
+    var ty = agent.y + Math.sin(orbitA) * ev.orbitR;
+    ev.vx += (tx - ev.x) * 0.04 * dt;
+    ev.vy += (ty - ev.y) * 0.04 * dt;
+    for (var k = idx + 1; k < events.length; k++) {
+      var other = events[k];
+      if (other.source !== ev.source) continue;
+      var rx = other.x - ev.x;
+      var ry = other.y - ev.y;
+      var rd2 = rx * rx + ry * ry + 0.01;
+      if (rd2 > 1200) continue;
+      var rf = 20 / rd2;
+      ev.vx -= rx * rf * dt;
+      ev.vy -= ry * rf * dt;
+      other.vx += rx * rf * dt;
+      other.vy += ry * rf * dt;
+    }
+    ev.vx *= 0.88; ev.vy *= 0.88;
+    ev.x += ev.vx * dt;
+    ev.y += ev.vy * dt;
+    ev.x = Math.max(8, Math.min(W - 8, ev.x));
+    ev.y = Math.max(8, Math.min(H - 8, ev.y));
+  });
+  _drawBrainGraph(ts, now);
+}
+
+function _drawBrainGraph(ts, now) {
+  var ctx = _brainGraph.ctx;
+  if (!ctx) return;
+  var dpr = _brainGraph.dpr || 1;
+  var W = _brainGraph.width;
+  var H = _brainGraph.height;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(20,23,34,0.35)';
+  ctx.fillRect(0, 0, W, H);
+  _brainGraph.events.forEach(function(ev) {
+    var a = _brainGraph.agents[ev.source];
+    if (!a) return;
+    ctx.strokeStyle = 'rgba(148,163,184,0.22)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(ev.x, ev.y);
+    ctx.stroke();
+  });
+  _brainGraph.events.forEach(function(ev) {
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = ev.color || '#60a5fa';
+    ctx.fillStyle = ev.color || '#60a5fa';
+    ctx.beginPath();
+    ctx.arc(ev.x, ev.y, ev.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  _brainGraph.agentOrder.forEach(function(id) {
+    var a = _brainGraph.agents[id];
+    if (!a) return;
+    var active = now - a.lastSeen < 90000;
+    var color = active ? '#a855f7' : '#f59e0b';
+    if (!a.pulses) a.pulses = [];
+    a.pulses = a.pulses.filter(function(p) { return ts - p.start < 1200; });
+    a.pulses.forEach(function(p) {
+      var age = ts - p.start;
+      var t = age / 1200;
+      var radius = a.r + (44 * t);
+      var alpha = Math.max(0, 0.35 * (1 - t));
+      ctx.strokeStyle = active ? 'rgba(168,85,247,' + alpha + ')' : 'rgba(245,158,11,' + alpha + ')';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+    });
+    ctx.shadowBlur = 20;
+    ctx.shadowColor = color;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(230,234,244,0.92)';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText((a.label || a.id || 'agent').slice(0, 20), a.x, a.y + 28);
+  });
+  ctx.shadowBlur = 0;
+}
 
 var _brainTypeIcons = {
   'EXEC': '⚙️', 'SHELL': '⚙️', 'READ': '📖', 'WRITE': '✏️',
@@ -6164,6 +6707,11 @@ DASHBOARD_HTML = r"""
   .badge-error { background:rgba(239,68,68,0.2); color:#ef4444; }
   .badge-tool { background:rgba(148,163,184,0.2); color:#94a3b8; }
   .brain-detail { color:var(--text-secondary); flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; word-break:break-all; }
+  .brain-view-toggle { display:flex; gap:6px; margin-bottom:12px; }
+  .brain-view-btn { padding:4px 12px; border-radius:10px; border:1px solid var(--border); background:transparent; color:var(--text-muted); font-size:11px; font-weight:600; cursor:pointer; }
+  .brain-view-btn.active { border-color:#a855f7; background:rgba(168,85,247,0.2); color:#a855f7; }
+  .brain-graph-container { width:100%; height:500px; background:var(--bg-secondary); border-radius:8px; border:1px solid var(--border); overflow:hidden; }
+  #brain-graph-canvas { width:100%; height:500px; display:block; }
     .nav-tab { padding: 8px 16px; border-radius: 8px; background: transparent; border: 1px solid transparent; color: var(--text-tertiary); cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; transition: all 0.2s ease; position: relative; }
   .nav-tab:hover { background: var(--bg-hover); color: var(--text-secondary); }
   .nav-tab.active { background: var(--bg-accent); color: #ffffff; border-color: var(--bg-accent); }
@@ -7218,6 +7766,13 @@ function clawmetryLogout(){
   <button onclick="document.getElementById('heartbeat-banner').style.display='none'" style="background:#92400e;color:#fef3c7;border:none;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer;font-weight:600;">Dismiss</button>
 </div>
 
+<!-- Budget Cap Banner -->
+<div id="budget-cap-banner" style="display:none;padding:10px 16px;border-bottom:2px solid #f59e0b;font-size:13px;font-weight:600;align-items:center;gap:10px;background:#3f2a06;color:#fbbf24;">
+  <span style="font-size:18px;">&#9888;&#65039;</span>
+  <span id="budget-cap-banner-msg" style="flex:1;"></span>
+  <button onclick="document.getElementById('budget-cap-banner').style.display='none'" style="background:#92400e;color:#fef3c7;border:none;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer;font-weight:600;">Dismiss</button>
+</div>
+
 <!-- Budget Settings Modal -->
 <div id="budget-modal" style="display:none;position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,0.5);align-items:center;justify-content:center;">
   <div style="background:var(--bg-primary);border:1px solid var(--border-primary);border-radius:16px;width:90%;max-width:560px;padding:24px;box-shadow:0 25px 50px rgba(0,0,0,0.25);">
@@ -7337,6 +7892,10 @@ function clawmetryLogout(){
         <div class="stats-footer-sub">mo: <span id="cost-month">--</span></div>
       </div>
       <span id="cost-trend" style="display:none;">Estimated from usage -- may be $0 billed with OAuth auth</span>
+      <div style="margin-left:14px;min-width:160px;">
+        <div class="stats-footer-sub">Burn: <span id="budget-burn-rate">--</span></div>
+        <div class="stats-footer-sub">Proj/mo: <span id="budget-projected-month">--</span></div>
+      </div>
     </div>
     <div class="stats-footer-item">
       <span class="stats-footer-icon">🤖</span>
@@ -7490,6 +8049,13 @@ function clawmetryLogout(){
   </div>
   <div class="section-title">💰 Cost Breakdown <span id="usage-cost-info-icon" class="tooltip-info-icon" style="display:none;">i</span></div>
   <div class="card"><table class="usage-table" id="usage-cost-table"><tbody><tr><td colspan="3" style="color:#666;">Loading...</td></tr></tbody></table></div>
+  <div class="section-title">🧩 Cost By Plugin / Skill</div>
+  <div class="card">
+    <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
+      <canvas id="usage-plugin-pie" width="280" height="280" style="max-width:280px;max-height:280px;"></canvas>
+      <div id="usage-plugin-legend" style="flex:1;min-width:220px;font-size:12px;color:var(--text-secondary);">Loading...</div>
+    </div>
+  </div>
   <div id="otel-extra-sections" style="display:none;">
     <div class="grid" style="margin-top:16px;">
       <div class="card">
@@ -7917,12 +8483,16 @@ function clawmetryLogout(){
       <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Activity density -- last 60 min (30s buckets)</div>
       <canvas id="brain-density-chart" height="60" style="width:100%;display:block;"></canvas>
     </div>
+    <div class="brain-view-toggle">
+      <button id="brain-view-list-btn" class="brain-view-btn active" onclick="setBrainViewMode('list',this)">List</button>
+      <button id="brain-view-graph-btn" class="brain-view-btn" onclick="setBrainViewMode('graph',this)">Graph</button>
+    </div>
     <!-- Source filter chips -->
     <div id="brain-filter-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
       <button class="brain-chip active" data-source="all" onclick="setBrainFilter('all',this)" style="padding:3px 10px;border-radius:12px;border:1px solid #a855f7;background:rgba(168,85,247,0.2);color:#a855f7;font-size:11px;cursor:pointer;font-weight:600;">All</button>
     </div>
     <!-- Event stream -->
-    <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:10px 14px;">
+    <div id="brain-feed" style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:10px 14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <span style="font-size:11px;color:var(--text-muted);">Live event stream (newest first)</span>
         <span id="brain-new-pill" style="display:none;background:#a855f7;color:#fff;border-radius:10px;padding:1px 8px;font-size:10px;font-weight:700;cursor:pointer;" onclick="scrollBrainToTop()">↑ new events</span>
@@ -7930,6 +8500,9 @@ function clawmetryLogout(){
       <div id="brain-stream" style="max-height:600px;overflow-y:auto;">
         <div style="color:var(--text-muted);padding:20px">Loading...</div>
       </div>
+    </div>
+    <div id="brain-graph-wrap" class="brain-graph-container" style="display:none;">
+      <canvas id="brain-graph-canvas"></canvas>
     </div>
   </div>
 </div><!-- end page-brain -->
@@ -9200,6 +9773,7 @@ function _startBrainSSE() {
         // Re-render with current filters
         renderBrainStream(_brainAllEvents);
         renderBrainChart(_brainAllEvents);
+        syncBrainGraph(_brainAllEvents);
         // Update source chips if new source
         var known = document.querySelector('[data-source="' + ev.source + '"]');
         if (!known && ev.source !== 'all') {
@@ -9272,6 +9846,7 @@ async function loadBrainPage(silent) {
     renderBrainFilterChips(data.sources || []);
     renderBrainTypeChips(events);
     renderBrainChart(events);
+    syncBrainGraph(events);
     var streamEl = document.getElementById('brain-stream');
     var wasAtTop = !streamEl || streamEl.scrollTop < 40;
     renderBrainStream(events);
@@ -9961,18 +10536,26 @@ async function loadSessions() {
     // In cloud mode: /api/sessions and /api/subagents already handle CLOUD_MODE server-side
     // fetch interceptor appends node_id+token so these hit the cloud endpoints correctly
   }
-  var [sessData, saData] = await Promise.all([
+  var [sessData, saData, anomalyData] = await Promise.all([
     fetch('/api/sessions').then(r => r.json()).catch(function() { return {sessions:[]}; }),
-    fetch('/api/subagents').then(r => r.json()).catch(function() { return {subagents:[]}; })
+    fetch('/api/subagents').then(r => r.json()).catch(function() { return {subagents:[]}; }),
+    fetch('/api/usage/anomalies').then(r => r.json()).catch(function() { return {anomalies:[]}; })
   ]);
+  var anomalySet = {};
+  (anomalyData.anomalies || []).forEach(function(a) { if (a && a.session_id) anomalySet[a.session_id] = a; });
   var html = '';
   // Main sessions (non-subagent)
   var mainSessions = sessData.sessions.filter(function(s) { return !(s.sessionId || '').includes('subagent'); });
   var subagents = saData.subagents || [];
   
   mainSessions.forEach(function(s) {
+    var anomaly = anomalySet[s.sessionId];
     html += '<div class="session-item" style="border-left:3px solid var(--bg-accent);padding-left:16px;">';
-    html += '<div class="session-name">🖥️ ' + escHtml(s.displayName || s.key) + ' <span style="font-size:11px;color:var(--text-muted);font-weight:400;">Main Session</span></div>';
+    html += '<div class="session-name">🖥️ ' + escHtml(s.displayName || s.key) + ' <span style="font-size:11px;color:var(--text-muted);font-weight:400;">Main Session</span>';
+    if (anomaly) {
+      html += '<span class="session-anomaly" title="Cost anomaly: $' + Number(anomaly.cost_usd || 0).toFixed(4) + ' (' + Number(anomaly.ratio || 0).toFixed(2) + 'x rolling avg)">&#9888;&#65039;</span>';
+    }
+    html += '</div>';
     html += '<div class="session-meta">';
     html += '<span><span class="badge model">' + (s.model||'default') + '</span></span>';
     if (s.channel !== 'unknown') html += '<span><span class="badge channel">' + s.channel + '</span></span>';
@@ -10062,6 +10645,8 @@ function renderCrons() {
     if (j.state && j.state.lastDurationMs) html += ' &middot; Took: ' + (j.state.lastDurationMs/1000).toFixed(1) + 's';
     if (j.lastRunTokens) html += ' &middot; ' + j.lastRunTokens.toLocaleString() + ' tok';
     if (j.lastRunCostUsd) html += ' &middot; $' + j.lastRunCostUsd.toFixed(4);
+    if (typeof j.cost_usd === 'number') html += ' &middot; Total: $' + Number(j.cost_usd).toFixed(4);
+    if (j.cost_session_count) html += ' (' + j.cost_session_count + ' runs)';
     html += '</div>';
     // Cost badges
     var badges = '';
@@ -15532,13 +16117,49 @@ def api_sessions():
 
 @bp_crons.route('/api/crons')
 def api_crons():
+    def _with_costs(jobs):
+        if not isinstance(jobs, list):
+            return jobs
+        analytics = _compute_transcript_analytics()
+        sessions = [s for s in analytics.get('sessions', []) if s.get('is_cron_candidate')]
+        if not sessions:
+            return jobs
+
+        cost_by_job = defaultdict(float)
+        count_by_job = defaultdict(int)
+
+        for sess in sessions:
+            best_idx = None
+            best_score = 0
+            for idx, job in enumerate(jobs):
+                score = _score_cron_match(sess, job if isinstance(job, dict) else {})
+                if score > best_score:
+                    best_score = score
+                    best_idx = idx
+            if best_idx is not None and best_score >= 20:
+                cost = float(sess.get('cost_usd', 0.0) or 0.0)
+                cost_by_job[best_idx] += cost
+                count_by_job[best_idx] += 1
+
+        out = []
+        for idx, job in enumerate(jobs):
+            if not isinstance(job, dict):
+                out.append(job)
+                continue
+            j2 = dict(job)
+            j2['cost_usd'] = round(cost_by_job.get(idx, 0.0), 6)
+            j2['cost_session_count'] = int(count_by_job.get(idx, 0))
+            out.append(j2)
+        return out
+
     # Try gateway API first
     gw_data = _gw_invoke('cron', {'action': 'list', 'includeDisabled': True})
     if gw_data and 'jobs' in gw_data:
+        jobs = _with_costs(gw_data.get('jobs', []))
         try: _ext_emit('cron.run', {'count': len(gw_data.get('jobs', []))})
         except Exception: pass
-        return jsonify({'jobs': gw_data['jobs']})
-    return jsonify({'jobs': _get_crons()})
+        return jsonify({'jobs': jobs})
+    return jsonify({'jobs': _with_costs(_get_crons())})
 
 
 @bp_crons.route('/api/cron/fix', methods=['POST'])
@@ -17177,6 +17798,56 @@ def api_alerts_active():
     return jsonify({'alerts': _get_active_alerts()})
 
 
+@bp_alerts.route('/api/alerts/webhook', methods=['GET', 'POST'])
+def api_alerts_webhook():
+    """Get or update outgoing webhook configuration."""
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        allowed = {
+            'webhook_url', 'slack_webhook_url', 'discord_webhook_url',
+            'cost_spike_alerts', 'agent_error_rate_alerts', 'security_posture_changes'
+        }
+        updates = {k: data[k] for k in data if k in allowed}
+        cfg = _save_alerts_webhook_config(updates)
+        return jsonify({'ok': True, 'config': cfg})
+    return jsonify(_load_alerts_webhook_config())
+
+
+@bp_alerts.route('/api/alerts/webhook/test', methods=['POST'])
+def api_alerts_webhook_test():
+    """Send a test payload to configured outgoing webhooks."""
+    data = request.get_json(silent=True) or {}
+    target = str(data.get('target', 'all')).strip().lower()
+    cfg = _load_alerts_webhook_config()
+    payload = {
+        'type': 'test_alert',
+        'agent': 'main',
+        'cost_usd': 0,
+        'threshold': 0,
+        'timestamp': time.time(),
+        'message': 'ClawMetry webhook test alert',
+    }
+    sent = []
+    if target in ('all', 'generic'):
+        url = str(cfg.get('webhook_url', '')).strip()
+        if url:
+            _send_webhook_alert(url, payload, payload_type='generic')
+            sent.append('generic')
+    if target in ('all', 'slack'):
+        url = str(cfg.get('slack_webhook_url', '')).strip()
+        if url:
+            _send_webhook_alert(url, payload, payload_type='slack')
+            sent.append('slack')
+    if target in ('all', 'discord'):
+        url = str(cfg.get('discord_webhook_url', '')).strip()
+        if url:
+            _send_webhook_alert(url, payload, payload_type='discord')
+            sent.append('discord')
+    if not sent:
+        return jsonify({'ok': False, 'error': 'No configured webhook URL for selected target'}), 400
+    return jsonify({'ok': True, 'sent': sent})
+
+
 # ── History / Time-Series API ────────────────────────────────────────────
 
 @bp_history.route('/api/history/metrics')
@@ -17498,6 +18169,323 @@ _usage_cache = {'data': None, 'ts': 0}
 _USAGE_CACHE_TTL = 60  # seconds
 _sessions_cache = {'data': None, 'ts': 0}
 _SESSIONS_CACHE_TTL = 10  # seconds
+_transcript_analytics_cache = {'data': None, 'ts': 0}
+_TRANSCRIPT_ANALYTICS_TTL = 60  # seconds
+
+
+def _get_sessions_dir():
+    base = SESSIONS_DIR or os.path.expanduser('~/.openclaw/agents/main/sessions')
+    if os.path.isdir(base):
+        return base
+    fallback = os.path.expanduser('~/.moltbot/agents/main/sessions')
+    return fallback if os.path.isdir(fallback) else base
+
+
+def _parse_event_timestamp(ts_val, fallback_ts=None):
+    if ts_val is None:
+        return fallback_ts
+    try:
+        if isinstance(ts_val, (int, float)):
+            return datetime.fromtimestamp(ts_val / 1000 if ts_val > 1e12 else ts_val)
+        if isinstance(ts_val, str):
+            return datetime.fromisoformat(ts_val.replace('Z', '+00:00'))
+    except Exception:
+        pass
+    return fallback_ts
+
+
+def _extract_usage_metrics(obj):
+    """Best-effort usage extraction from mixed transcript schemas."""
+    message = obj.get('message', {}) if isinstance(obj.get('message'), dict) else {}
+    usage = message.get('usage')
+    if not isinstance(usage, dict):
+        usage = obj.get('usage')
+    if not isinstance(usage, dict):
+        usage = obj.get('tokens_used')
+    if not isinstance(usage, dict):
+        return {'tokens': 0, 'cost': 0.0}
+
+    in_toks = usage.get('input', usage.get('input_tokens', 0)) or 0
+    out_toks = usage.get('output', usage.get('output_tokens', 0)) or 0
+    cache_read = usage.get('cacheRead', usage.get('cache_read_tokens', 0)) or 0
+    cache_write = usage.get('cacheWrite', usage.get('cache_write_tokens', 0)) or 0
+    total = usage.get('totalTokens', usage.get('total_tokens', 0)) or 0
+    if not total:
+        total = in_toks + out_toks + cache_read + cache_write
+
+    cost = 0.0
+    cost_data = usage.get('cost', {})
+    if isinstance(cost_data, dict):
+        raw = cost_data.get('total', cost_data.get('usd', 0))
+        try:
+            cost = float(raw or 0)
+        except Exception:
+            cost = 0.0
+    elif isinstance(cost_data, (int, float)):
+        cost = float(cost_data)
+
+    return {
+        'tokens': int(total or 0),
+        'cost': float(cost or 0.0),
+    }
+
+
+def _normalize_plugin_name(tool_name):
+    name = str(tool_name or '').strip().lower()
+    if not name:
+        return ''
+    for sep in ('/', ':', '.'):
+        if sep in name:
+            name = name.split(sep, 1)[0]
+            break
+    return name[:64]
+
+
+def _extract_tool_plugins(obj):
+    """Extract plugin/tool names from known tool call locations."""
+    plugins = []
+    message = obj.get('message', {}) if isinstance(obj.get('message'), dict) else {}
+
+    # Newer format: message.content[{type:'toolCall', name:'...'}]
+    for part in (message.get('content') or []):
+        if not isinstance(part, dict):
+            continue
+        if part.get('type') == 'toolCall':
+            p = _normalize_plugin_name(part.get('name', ''))
+            if p:
+                plugins.append(p)
+
+    # OpenAI-like tool call array
+    for tc in (obj.get('tool_calls') or []):
+        if not isinstance(tc, dict):
+            continue
+        p = _normalize_plugin_name(tc.get('name') or (tc.get('function') or {}).get('name', ''))
+        if p:
+            plugins.append(p)
+
+    # Alternate key
+    for tc in (obj.get('tool_use') or []):
+        if not isinstance(tc, dict):
+            continue
+        p = _normalize_plugin_name(tc.get('name', ''))
+        if p:
+            plugins.append(p)
+
+    return plugins
+
+
+def _collect_cron_refs(obj, out_refs):
+    """Recursively collect explicit cron/job IDs from transcript event objects."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            lk = str(k).lower()
+            if lk in ('cronid', 'cron_id', 'cronjobid', 'cron_job_id', 'jobid', 'job_id', 'scheduleid', 'schedule_id'):
+                if isinstance(v, (str, int, float)):
+                    sv = str(v).strip().lower()
+                    if sv:
+                        out_refs.add(sv)
+            _collect_cron_refs(v, out_refs)
+    elif isinstance(obj, list):
+        for it in obj:
+            _collect_cron_refs(it, out_refs)
+
+
+def _score_cron_match(session, job):
+    """Heuristic score for mapping a session to a cron job."""
+    refs = session.get('explicit_cron_refs', set())
+    text = session.get('search_text', '')
+    score = 0
+
+    jid = str(job.get('id', '')).strip().lower()
+    jname = str(job.get('name', job.get('label', ''))).strip().lower()
+
+    if jid and jid in refs:
+        score += 100
+    if jname and jname in refs:
+        score += 80
+    if jid and jid in text:
+        score += 30
+    if jname and len(jname) >= 4 and jname in text:
+        score += 20
+
+    payload = job.get('payload') or job.get('config') or {}
+    if isinstance(payload, dict):
+        prompt = str(payload.get('prompt') or payload.get('text') or payload.get('message') or '').strip().lower()
+        if prompt:
+            for w in [w for w in _re.split(r'[^a-z0-9_]+', prompt) if len(w) >= 5][:8]:
+                if w in text:
+                    score += 1
+    return score
+
+
+def _compute_transcript_analytics():
+    """Parse transcript files once for usage, anomalies, cron attribution, and plugin breakdown."""
+    now = time.time()
+    if _transcript_analytics_cache['data'] is not None and (now - _transcript_analytics_cache['ts']) < _TRANSCRIPT_ANALYTICS_TTL:
+        return _transcript_analytics_cache['data']
+
+    sessions_dir = _get_sessions_dir()
+    summaries = []
+    plugin_stats = defaultdict(lambda: {'tokens': 0.0, 'cost': 0.0, 'calls': 0})
+    daily_tokens = {}
+    daily_cost = {}
+    model_usage = {}
+
+    if os.path.isdir(sessions_dir):
+        for fname in os.listdir(sessions_dir):
+            if not fname.endswith('.jsonl'):
+                continue
+            sid = fname.replace('.jsonl', '')
+            fpath = os.path.join(sessions_dir, fname)
+            fallback_dt = datetime.fromtimestamp(os.path.getmtime(fpath))
+
+            s_tokens = 0
+            s_cost = 0.0
+            s_model = 'unknown'
+            s_start = None
+            s_end = None
+            search_parts = []
+            explicit_cron_refs = set()
+
+            try:
+                with open(fpath, 'r') as f:
+                    for line in f:
+                        try:
+                            obj = json.loads(line.strip())
+                        except Exception:
+                            continue
+
+                        ts = _parse_event_timestamp(
+                            obj.get('timestamp') or obj.get('time') or obj.get('created_at'),
+                            fallback_dt
+                        )
+                        if ts:
+                            if s_start is None or ts < s_start:
+                                s_start = ts
+                            if s_end is None or ts > s_end:
+                                s_end = ts
+
+                        # Collect cron hints from metadata and known custom session-info events
+                        _collect_cron_refs(obj, explicit_cron_refs)
+                        if obj.get('customType') == 'openclaw.session-info':
+                            search_parts.append(json.dumps(obj.get('data', {}), default=str).lower())
+
+                        message = obj.get('message', {}) if isinstance(obj.get('message'), dict) else {}
+                        model = message.get('model') or obj.get('model')
+                        if model:
+                            s_model = model
+
+                        usage_metrics = _extract_usage_metrics(obj)
+                        tokens = usage_metrics['tokens']
+                        cost = usage_metrics['cost']
+
+                        if tokens > 0:
+                            s_tokens += tokens
+                            if cost > 0:
+                                s_cost += cost
+
+                            plugins = _extract_tool_plugins(obj)
+                            if plugins:
+                                share_tokens = float(tokens) / float(len(plugins))
+                                share_cost = float(cost) / float(len(plugins)) if cost > 0 else 0.0
+                                for p in plugins:
+                                    plugin_stats[p]['tokens'] += share_tokens
+                                    plugin_stats[p]['cost'] += share_cost
+                                    plugin_stats[p]['calls'] += 1
+
+                        # Textual hints for cron matching
+                        if isinstance(message.get('content'), list):
+                            for part in message.get('content', []):
+                                if isinstance(part, dict):
+                                    txt = part.get('text')
+                                    if isinstance(txt, str) and txt:
+                                        search_parts.append(txt.lower())
+                        if obj.get('type') == 'custom':
+                            try:
+                                search_parts.append(json.dumps(obj, default=str).lower())
+                            except Exception:
+                                pass
+
+                if s_start is None:
+                    s_start = fallback_dt
+                if s_end is None:
+                    s_end = fallback_dt
+
+                day = s_start.strftime('%Y-%m-%d')
+                daily_tokens[day] = daily_tokens.get(day, 0) + s_tokens
+                daily_cost[day] = daily_cost.get(day, 0.0) + s_cost
+                model_usage[s_model] = model_usage.get(s_model, 0) + s_tokens
+
+                search_text = ' '.join(search_parts)
+                if len(search_text) > 12000:
+                    search_text = search_text[:12000]
+
+                summaries.append({
+                    'session_id': sid,
+                    'tokens': s_tokens,
+                    'cost_usd': s_cost,
+                    'model': s_model,
+                    'start_ts': s_start.timestamp() if s_start else 0,
+                    'end_ts': s_end.timestamp() if s_end else 0,
+                    'day': day,
+                    'search_text': search_text,
+                    'explicit_cron_refs': explicit_cron_refs,
+                    'is_cron_candidate': ('cron' in search_text) or bool(explicit_cron_refs),
+                })
+            except Exception:
+                continue
+
+    summaries.sort(key=lambda s: s.get('start_ts', 0))
+    result = {
+        'sessions': summaries,
+        'plugin_stats': plugin_stats,
+        'daily_tokens': daily_tokens,
+        'daily_cost': daily_cost,
+        'model_usage': model_usage,
+    }
+    _transcript_analytics_cache['data'] = result
+    _transcript_analytics_cache['ts'] = now
+    return result
+
+
+def _compute_session_cost_anomalies(session_summaries):
+    """Flag sessions with cost >2x their rolling 7-day session-cost average."""
+    now_ts = time.time()
+    day_ago = now_ts - 86400
+    anomalies = []
+
+    for i, sess in enumerate(session_summaries):
+        ts = sess.get('start_ts', 0) or 0
+        if ts < day_ago:
+            continue
+        cost = float(sess.get('cost_usd', 0.0) or 0.0)
+        if cost <= 0:
+            continue
+
+        window_start = ts - (7 * 86400)
+        window_costs = []
+        for prev in session_summaries[:i]:
+            pts = prev.get('start_ts', 0) or 0
+            pc = float(prev.get('cost_usd', 0.0) or 0.0)
+            if pts >= window_start and pts < ts and pc > 0:
+                window_costs.append(pc)
+
+        if not window_costs:
+            continue
+        avg = sum(window_costs) / float(len(window_costs))
+        if avg <= 0:
+            continue
+        if cost > (2.0 * avg):
+            anomalies.append({
+                'session_id': sess.get('session_id'),
+                'cost_usd': round(cost, 6),
+                'rolling_avg_usd': round(avg, 6),
+                'ratio': round(cost / avg, 3),
+                'timestamp': int(ts * 1000),
+            })
+
+    anomalies.sort(key=lambda a: a.get('ratio', 0), reverse=True)
+    return anomalies
 
 # ── New Feature APIs ────────────────────────────────────────────────────
 
@@ -17518,87 +18506,16 @@ def api_usage():
         except Exception: pass
         return jsonify(result)
 
-    # NEW: Parse transcript JSONL files for real usage data
-    sessions_dir = SESSIONS_DIR or os.path.expanduser('~/.moltbot/agents/main/sessions')
-    daily_tokens = {}
-    daily_cost = {}
-    model_usage = {}
-    session_costs = {}
-    
-    if os.path.isdir(sessions_dir):
-        for fname in os.listdir(sessions_dir):
-            if not fname.endswith('.jsonl'):
-                continue
-            fpath = os.path.join(sessions_dir, fname)
-            session_cost = 0
-            
-            try:
-                with open(fpath, 'r') as f:
-                    for line in f:
-                        try:
-                            obj = json.loads(line.strip())
-                            
-                            # Only process message entries with usage data
-                            if obj.get('type') != 'message':
-                                continue
-                                
-                            message = obj.get('message', {})
-                            usage = message.get('usage')
-                            if not usage or not isinstance(usage, dict):
-                                continue
-                                
-                            # Extract the exact usage format from the brief
-                            tokens_data = {
-                                'input': usage.get('input', 0),
-                                'output': usage.get('output', 0),
-                                'cacheRead': usage.get('cacheRead', 0),
-                                'cacheWrite': usage.get('cacheWrite', 0),
-                                'totalTokens': usage.get('totalTokens', 0),
-                                'cost': usage.get('cost', {})
-                            }
-                            
-                            cost_data = tokens_data['cost']
-                            if isinstance(cost_data, dict) and 'total' in cost_data:
-                                total_cost = float(cost_data['total'])
-                            else:
-                                total_cost = 0.0
-                            
-                            # Extract model name
-                            model = message.get('model', 'unknown') or 'unknown'
-                            
-                            # Get timestamp and convert to date
-                            ts = obj.get('timestamp')
-                            if ts:
-                                # Handle ISO timestamp strings
-                                if isinstance(ts, str):
-                                    try:
-                                        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-                                    except:
-                                        continue
-                                else:
-                                    # Handle numeric timestamps
-                                    dt = datetime.fromtimestamp(ts / 1000 if ts > 1e12 else ts)
-                                
-                                day = dt.strftime('%Y-%m-%d')
-                                
-                                # Aggregate daily tokens and costs
-                                daily_tokens[day] = daily_tokens.get(day, 0) + tokens_data['totalTokens']
-                                daily_cost[day] = daily_cost.get(day, 0) + total_cost
-                                
-                                # Track model usage
-                                model_usage[model] = model_usage.get(model, 0) + tokens_data['totalTokens']
-                                
-                                # Track session costs
-                                session_cost += total_cost
-                                
-                        except (json.JSONDecodeError, ValueError, KeyError):
-                            continue
-                            
-                # Store session cost
-                session_costs[fname.replace('.jsonl', '')] = session_cost
-                        
-            except Exception:
-                continue
+    analytics = _compute_transcript_analytics()
+    daily_tokens = analytics.get('daily_tokens', {})
+    daily_cost = analytics.get('daily_cost', {})
+    model_usage = analytics.get('model_usage', {})
+    session_summaries = analytics.get('sessions', [])
+    session_costs = {
+        s.get('session_id', ''): round(float(s.get('cost_usd', 0.0) or 0.0), 6)
+        for s in session_summaries
+    }
+    anomalies = _compute_session_cost_anomalies(session_summaries)
 
     # Build response data
     today = datetime.now()
@@ -17651,6 +18568,8 @@ def api_usage():
         'modelBilling': model_billing,
         'billingSummary': billing_summary,
         'sessionCosts': session_costs,
+        'anomalies': anomalies,
+        'anomalySessionIds': [a.get('session_id') for a in anomalies],
         'trend': trend_data,
         'warnings': warnings,
     }
@@ -17658,6 +18577,49 @@ def api_usage():
     _usage_cache['data'] = result
     _usage_cache['ts'] = _time.time()
     return jsonify(result)
+
+
+@bp_usage.route('/api/usage/anomalies')
+def api_usage_anomalies():
+    """Return session cost anomalies vs rolling 7-day baseline."""
+    analytics = _compute_transcript_analytics()
+    session_summaries = analytics.get('sessions', [])
+    anomalies = _compute_session_cost_anomalies(session_summaries)
+    baseline_costs = [
+        float(s.get('cost_usd', 0.0) or 0.0)
+        for s in session_summaries
+        if (time.time() - float(s.get('start_ts', 0) or 0)) <= (7 * 86400) and float(s.get('cost_usd', 0.0) or 0.0) > 0
+    ]
+    baseline_avg = (sum(baseline_costs) / float(len(baseline_costs))) if baseline_costs else 0.0
+    return jsonify({
+        'anomalies': anomalies,
+        'baseline_7d_avg_usd': round(baseline_avg, 6),
+        'threshold_multiplier': 2.0,
+    })
+
+
+@bp_usage.route('/api/usage/by-plugin')
+def api_usage_by_plugin():
+    """Return plugin/skill token and cost attribution from transcript tool calls."""
+    analytics = _compute_transcript_analytics()
+    plugin_stats = analytics.get('plugin_stats', {})
+    total_tokens = sum(float(v.get('tokens', 0.0) or 0.0) for v in plugin_stats.values())
+    total_tokens = total_tokens if total_tokens > 0 else 1.0
+
+    rows = []
+    for plugin, stats in plugin_stats.items():
+        toks = float(stats.get('tokens', 0.0) or 0.0)
+        cost = float(stats.get('cost', 0.0) or 0.0)
+        calls = int(stats.get('calls', 0) or 0)
+        rows.append({
+            'plugin': plugin,
+            'total_tokens': int(round(toks)),
+            'cost_usd': round(cost, 6),
+            'call_count': calls,
+            'pct_of_total': round((toks / total_tokens) * 100.0, 2),
+        })
+    rows.sort(key=lambda r: r['total_tokens'], reverse=True)
+    return jsonify({'plugins': rows})
 
 
 @bp_usage.route('/api/usage/export')
