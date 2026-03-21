@@ -10551,6 +10551,7 @@ async function loadSessions() {
   mainSessions.forEach(function(s) {
     var anomaly = anomalySet[s.sessionId];
     var sid = s.sessionId || s.id || s.key || '';
+    var sparkId = 'session-burn-' + Math.random().toString(36).slice(2);
     html += '<div class="session-item" style="border-left:3px solid var(--bg-accent);padding-left:16px;">';
     html += '<div class="session-name" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">';
     html += '<span>🖥️ ' + escHtml(s.displayName || s.key) + ' <span style="font-size:11px;color:var(--text-muted);font-weight:400;">Main Session</span>';
@@ -10564,6 +10565,13 @@ async function loadSessions() {
     html += '<span><span class="badge model">' + (s.model||'default') + '</span></span>';
     if (s.channel !== 'unknown') html += '<span><span class="badge channel">' + s.channel + '</span></span>';
     html += '<span>Updated ' + timeAgo(s.updatedAt) + '</span>';
+    html += '</div>';
+    html += '<div style="margin-top:8px;padding:8px;background:var(--bg-secondary);border:1px solid var(--border-primary);border-radius:8px;">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">';
+    html += '<span style="font-size:12px;color:var(--text-secondary);">Burn: <strong style="color:var(--text-primary);">' + Number(s.tokensPerMin || 0).toFixed(1) + ' tok/min</strong></span>';
+    html += '<span style="font-size:12px;color:var(--text-secondary);">Projected (1h): <strong style="color:var(--text-primary);">$' + Number(s.projectedCostUsd || 0).toFixed(4) + '</strong></span>';
+    html += '</div>';
+    html += '<canvas id="' + sparkId + '" width="220" height="28" style="margin-top:6px;width:100%;height:28px;"></canvas>';
     html += '</div>';
     // Sub-agents nested underneath
     if (subagents.length > 0) {
@@ -10605,6 +10613,12 @@ async function loadSessions() {
   }
   
   document.getElementById('sessions-list').innerHTML = html || '<div style="padding:16px;color:var(--text-muted);">No sessions found</div>';
+  mainSessions.forEach(function(s, i) {
+    var canvas = document.querySelectorAll('#sessions-list canvas')[i];
+    if (!canvas) return;
+    var pts = Array.isArray(s.burnSeries) ? s.burnSeries : [];
+    drawSessionSparkline(canvas, pts);
+  });
 }
 
 async function stopSession(sessionId) {
@@ -10620,6 +10634,27 @@ async function stopSession(sessionId) {
   } catch(e) {
     alert('Emergency stop failed: ' + e.message);
   }
+}
+
+function drawSessionSparkline(canvas, points) {
+  if (!canvas || !canvas.getContext) return;
+  var ctx = canvas.getContext('2d');
+  var w = canvas.width;
+  var h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  var pts = (points || []).slice(-10);
+  while (pts.length < 10) pts.unshift(0);
+  var maxV = 1;
+  pts.forEach(function(v){ if (v > maxV) maxV = v; });
+  ctx.strokeStyle = 'rgba(96,255,128,0.95)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  pts.forEach(function(v, i){
+    var x = (i / (pts.length - 1)) * (w - 2) + 1;
+    var y = h - 2 - ((v / maxV) * (h - 4));
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
 }
 
 var _cronJobs = [];
@@ -16130,8 +16165,47 @@ def api_main_activity():
 def api_sessions():
     gw_data = _gw_invoke('sessions_list', {'limit': 50, 'messageLimit': 0})
     if gw_data and 'sessions' in gw_data:
-        return jsonify({'sessions': gw_data['sessions']})
-    return jsonify({'sessions': _get_sessions()})
+        return jsonify({'sessions': _augment_sessions_with_burn(gw_data['sessions'])})
+    return jsonify({'sessions': _augment_sessions_with_burn(_get_sessions())})
+
+
+@bp_sessions.route('/api/sessions/<session_id>/stop', methods=['POST'])
+def api_session_stop(session_id):
+    """Emergency stop for a session: SIGTERM if pid is known and/or .stop signal file."""
+    target = _resolve_session_stop_target(session_id)
+    sid = target.get('session_id', '')
+    if not sid:
+        return jsonify({'ok': False, 'error': 'Invalid session id'}), 400
+
+    did_signal = False
+    did_file = False
+    errors = []
+    pid = target.get('pid')
+    if isinstance(pid, int) and pid > 1 and sys.platform != 'win32':
+        try:
+            os.kill(pid, 15)  # SIGTERM
+            did_signal = True
+        except Exception as e:
+            errors.append(f'sigterm_failed:{e}')
+
+    stop_path = target.get('stop_path', '')
+    try:
+        if stop_path:
+            with open(stop_path, 'w') as f:
+                f.write(json.dumps({'timestamp': time.time(), 'reason': 'dashboard_emergency_stop'}))
+            did_file = True
+    except Exception as e:
+        errors.append(f'stop_file_failed:{e}')
+
+    if not did_signal and not did_file:
+        return jsonify({'ok': False, 'error': 'Unable to issue stop signal', 'details': errors}), 500
+    return jsonify({
+        'ok': True,
+        'session_id': sid,
+        'sigterm_sent': did_signal,
+        'stop_file_written': did_file,
+        'errors': errors,
+    })
 
 
 @bp_crons.route('/api/crons')
@@ -22842,6 +22916,177 @@ def _get_sessions_from_files():
     try: _ext_emit('session.snapshot', {'count': len(sessions)})
     except Exception: pass
     return sessions
+
+
+def _safe_session_id(raw_id):
+    sid = str(raw_id or '').strip()
+    if not sid or '/' in sid or '\\' in sid or '\x00' in sid or '..' in sid:
+        return ''
+    return sid
+
+
+def _resolve_session_stop_target(session_id):
+    """Resolve stop target info for a session id/key."""
+    sid = _safe_session_id(session_id)
+    if not sid:
+        return {'session_id': '', 'jsonl_path': '', 'stop_path': '', 'pid': None}
+    sessions_dir = SESSIONS_DIR or os.path.expanduser('~/.openclaw/agents/main/sessions')
+    final_sid = sid
+    pid = None
+
+    direct_jsonl = os.path.join(sessions_dir, f'{sid}.jsonl')
+    if os.path.exists(direct_jsonl):
+        stop_path = os.path.join(sessions_dir, f'{sid}.stop')
+        return {'session_id': sid, 'jsonl_path': direct_jsonl, 'stop_path': stop_path, 'pid': None}
+
+    idx = os.path.join(sessions_dir, 'sessions.json')
+    try:
+        with open(idx, 'r') as f:
+            mapping = json.load(f)
+        if isinstance(mapping, dict):
+            for key, meta in mapping.items():
+                if not isinstance(meta, dict):
+                    continue
+                mapped_sid = str(meta.get('sessionId', '')).strip()
+                if sid in (key, mapped_sid):
+                    if mapped_sid:
+                        final_sid = mapped_sid
+                    pid_raw = meta.get('pid') or meta.get('processId')
+                    try:
+                        pid = int(pid_raw)
+                    except Exception:
+                        pid = None
+                    break
+    except Exception:
+        pass
+
+    jsonl_path = os.path.join(sessions_dir, f'{final_sid}.jsonl')
+    stop_path = os.path.join(sessions_dir, f'{final_sid}.stop')
+    return {'session_id': final_sid, 'jsonl_path': jsonl_path, 'stop_path': stop_path, 'pid': pid}
+
+
+def _estimate_usd_per_token():
+    """Estimate USD per token from recent metrics; fallback to conservative default."""
+    now = time.time()
+    start = now - 86400
+    total_tokens = 0.0
+    total_cost = 0.0
+    with _metrics_lock:
+        for t in metrics_store.get('tokens', []):
+            if t.get('timestamp', 0) >= start:
+                total_tokens += float(t.get('total', 0) or 0)
+        for c in metrics_store.get('cost', []):
+            if c.get('timestamp', 0) >= start:
+                total_cost += float(c.get('usd', 0) or 0)
+    if total_tokens > 0 and total_cost > 0:
+        return total_cost / total_tokens
+    return 3.0 / 1_000_000.0
+
+
+def _json_ts_to_epoch(v):
+    if not v:
+        return None
+    if isinstance(v, (int, float)):
+        iv = float(v)
+        if iv > 1e12:
+            return iv / 1000.0
+        return iv
+    try:
+        return datetime.fromisoformat(str(v).replace('Z', '+00:00')).timestamp()
+    except Exception:
+        return None
+
+
+def _session_burn_stats(session_id):
+    sid = _safe_session_id(session_id)
+    if not sid:
+        return {'tokensPerMin': 0, 'projectedCostUsd': 0.0, 'burnSeries': [0] * 10}
+    sessions_dir = SESSIONS_DIR or os.path.expanduser('~/.openclaw/agents/main/sessions')
+    fpath = os.path.join(sessions_dir, f'{sid}.jsonl')
+    if not os.path.exists(fpath):
+        return {'tokensPerMin': 0, 'projectedCostUsd': 0.0, 'burnSeries': [0] * 10}
+
+    points = []
+    try:
+        with open(fpath, 'r', errors='replace') as f:
+            lines = list(deque(f, maxlen=1200))
+        for line in lines:
+            try:
+                obj = json.loads(line.strip())
+            except Exception:
+                continue
+            ts = _json_ts_to_epoch(obj.get('timestamp') or obj.get('time') or obj.get('created_at'))
+            if not ts:
+                continue
+            tok = 0.0
+            msg = obj.get('message', {}) if isinstance(obj.get('message'), dict) else {}
+            usage = msg.get('usage', {}) if isinstance(msg.get('usage'), dict) else {}
+            tok = float(
+                usage.get('total_tokens')
+                or usage.get('totalTokens')
+                or usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
+                or 0
+            )
+            if tok <= 0:
+                content = msg.get('content', [])
+                text = ''
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    parts = []
+                    for b in content:
+                        if isinstance(b, dict):
+                            if b.get('type') == 'text':
+                                parts.append(str(b.get('text', '')))
+                            elif b.get('type') == 'thinking':
+                                parts.append(str(b.get('thinking', '')))
+                    text = ' '.join(parts)
+                if text:
+                    tok = max(1.0, len(text) / 4.0)
+            if tok > 0:
+                points.append((ts, tok))
+    except Exception:
+        return {'tokensPerMin': 0, 'projectedCostUsd': 0.0, 'burnSeries': [0] * 10}
+
+    if not points:
+        return {'tokensPerMin': 0, 'projectedCostUsd': 0.0, 'burnSeries': [0] * 10}
+
+    end_ts = max(ts for ts, _ in points)
+    start_ts = end_ts - 600
+    buckets = [0.0] * 10
+    for ts, tok in points:
+        if ts < start_ts:
+            continue
+        idx = int((ts - start_ts) // 60)
+        if idx < 0:
+            idx = 0
+        if idx > 9:
+            idx = 9
+        buckets[idx] += tok
+
+    recent = buckets[-5:] if len(buckets) >= 5 else buckets
+    tokens_per_min = (sum(recent) / len(recent)) if recent else 0.0
+    usd_per_token = _estimate_usd_per_token()
+    projected_cost = tokens_per_min * 60.0 * usd_per_token
+    return {
+        'tokensPerMin': round(tokens_per_min, 2),
+        'projectedCostUsd': round(projected_cost, 4),
+        'burnSeries': [round(x, 2) for x in buckets],
+    }
+
+
+def _augment_sessions_with_burn(sessions):
+    out = []
+    for s in sessions or []:
+        if not isinstance(s, dict):
+            out.append(s)
+            continue
+        row = dict(s)
+        sid = row.get('sessionId') or row.get('id') or row.get('key') or ''
+        row['sessionId'] = sid
+        row.update(_session_burn_stats(sid))
+        out.append(row)
+    return out
 
 
 def _get_crons():
