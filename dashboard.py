@@ -296,17 +296,40 @@ _fleet_db_lock = threading.Lock()
 
 
 def _fleet_db_path():
-    """Get path to the fleet SQLite database."""
+    """Get path to the fleet SQLite database.
+
+    Always uses ~/.clawmetry/fleet.db, creating the directory if needed.
+    The curl installer creates ~/.clawmetry/ but we must not rely on that --
+    this function is the authoritative path and ensures the dir exists.
+
+    Falls back to a workspace-relative path when WORKSPACE is set (dev mode).
+    """
     if FLEET_DB_PATH:
         return FLEET_DB_PATH
     if WORKSPACE:
         return os.path.join(WORKSPACE, '.clawmetry-fleet.db')
+    # Always use ~/.clawmetry/fleet.db -- create the dir if the installer
+    # has not run yet or this is a fresh pip install without curl | bash.
+    preferred_dir = os.path.expanduser('~/.clawmetry')
+    try:
+        os.makedirs(preferred_dir, exist_ok=True)
+    except OSError:
+        pass  # makedirs failed (permissions?), fall through to legacy path
+    if os.path.isdir(preferred_dir):
+        return os.path.join(preferred_dir, 'fleet.db')
+    # Last resort: legacy flat file in home dir (pre-installer environments)
     return os.path.expanduser('~/.clawmetry-fleet.db')
 
 
 def _fleet_db():
     """Get a SQLite connection to the fleet database."""
-    db = _sqlite3.connect(_fleet_db_path(), timeout=10)
+    path = _fleet_db_path()
+    # Ensure parent directory exists (defence-in-depth: guards against callers
+    # that bypass _fleet_init_db, and older code paths that skipped makedirs).
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    db = _sqlite3.connect(path, timeout=10)
     db.row_factory = _sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     return db
@@ -5494,17 +5517,40 @@ _fleet_db_lock = threading.Lock()
 
 
 def _fleet_db_path():
-    """Get path to the fleet SQLite database."""
+    """Get path to the fleet SQLite database.
+
+    Always uses ~/.clawmetry/fleet.db, creating the directory if needed.
+    The curl installer creates ~/.clawmetry/ but we must not rely on that --
+    this function is the authoritative path and ensures the dir exists.
+
+    Falls back to a workspace-relative path when WORKSPACE is set (dev mode).
+    """
     if FLEET_DB_PATH:
         return FLEET_DB_PATH
     if WORKSPACE:
         return os.path.join(WORKSPACE, '.clawmetry-fleet.db')
+    # Always use ~/.clawmetry/fleet.db -- create the dir if the installer
+    # has not run yet or this is a fresh pip install without curl | bash.
+    preferred_dir = os.path.expanduser('~/.clawmetry')
+    try:
+        os.makedirs(preferred_dir, exist_ok=True)
+    except OSError:
+        pass  # makedirs failed (permissions?), fall through to legacy path
+    if os.path.isdir(preferred_dir):
+        return os.path.join(preferred_dir, 'fleet.db')
+    # Last resort: legacy flat file in home dir (pre-installer environments)
     return os.path.expanduser('~/.clawmetry-fleet.db')
 
 
 def _fleet_db():
     """Get a SQLite connection to the fleet database."""
-    db = _sqlite3.connect(_fleet_db_path(), timeout=10)
+    path = _fleet_db_path()
+    # Ensure parent directory exists (defence-in-depth: guards against callers
+    # that bypass _fleet_init_db, and older code paths that skipped makedirs).
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    db = _sqlite3.connect(path, timeout=10)
     db.row_factory = _sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     return db
@@ -25410,7 +25456,21 @@ def _run_server(args):
         FLEET_API_KEY = args.fleet_api_key
     if args.fleet_db:
         FLEET_DB_PATH = os.path.expanduser(args.fleet_db)
-    _fleet_init_db()
+    try:
+        _fleet_init_db()
+    except Exception as _fleet_exc:
+        db_path = _fleet_db_path()
+        print(
+            f"\n[clawmetry] ERROR: Could not initialise fleet database at {db_path!r}\n"
+            f"  Cause: {_fleet_exc}\n\n"
+            f"  Try one of:\n"
+            f"    1. Ensure the directory exists and is writable:\n"
+            f"         mkdir -p ~/.clawmetry && chmod 700 ~/.clawmetry\n"
+            f"    2. Specify a custom path:\n"
+            f"         clawmetry --fleet-db /tmp/fleet.db\n",
+            flush=True,
+        )
+        raise SystemExit(1) from _fleet_exc
     _budget_init_db()
     _detect_heartbeat_interval()
     _start_fleet_maintenance_thread()
