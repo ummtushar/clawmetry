@@ -148,6 +148,8 @@ _budget_alert_cooldowns = {}  # rule_id -> last_fired_timestamp
 _AGENT_DOWN_SECONDS = 300  # 5 min with no OTLP data = agent down alert
 _ALERTS_CONFIG_FILE = os.path.expanduser('~/.openclaw/clawmetry-alerts.json')
 _security_posture_hash = ''
+_ALERTS_CONFIG_FILE = os.path.expanduser('~/.openclaw/clawmetry-alerts.json')
+_security_posture_hash = ''
 
 # ── OTLP Metrics Store ─────────────────────────────────────────────────
 METRICS_FILE = None  # Set via CLI/env, defaults to {WORKSPACE}/.clawmetry-metrics.json
@@ -10603,8 +10605,13 @@ async function loadSessions() {
   var subSessions = sessData.sessions.filter(function(s) { return (s.sessionId || '').includes('subagent'); });
   if (subSessions.length > 0 && mainSessions.length === 0) {
     sessData.sessions.forEach(function(s) {
+      var anomaly = anomalySet[s.sessionId];
       html += '<div class="session-item">';
-      html += '<div class="session-name">' + escHtml(s.displayName || s.key) + '</div>';
+      html += '<div class="session-name">' + escHtml(s.displayName || s.key);
+      if (anomaly) {
+        html += '<span class="session-anomaly" title="Cost anomaly: $' + Number(anomaly.cost_usd || 0).toFixed(4) + ' (' + Number(anomaly.ratio || 0).toFixed(2) + 'x rolling avg)">&#9888;&#65039;</span>';
+      }
+      html += '</div>';
       html += '<div class="session-meta">';
       html += '<span><span class="badge model">' + (s.model||'default') + '</span></span>';
       html += '<span>Updated ' + timeAgo(s.updatedAt) + '</span>';
