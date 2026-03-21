@@ -5727,6 +5727,7 @@ def _budget_check():
     global _budget_paused, _budget_paused_at, _budget_paused_reason
     if _budget_paused:
         return
+    now = time.time()
     config = _get_budget_config()
     status = _get_budget_status()
     warning_pct = config['warning_threshold_pct']
@@ -5739,6 +5740,20 @@ def _budget_check():
             continue
         spent = status[f'{period}_spent']
         pct = (spent / limit * 100) if limit > 0 else 0
+
+        if period in ('daily', 'weekly') and spent >= limit:
+            rule_id = f'webhook_{period}_threshold_breached'
+            last_fired = _budget_alert_cooldowns.get(rule_id, 0)
+            if now - last_fired >= 900:
+                _budget_alert_cooldowns[rule_id] = now
+                _dispatch_configured_webhooks(f'{period}_threshold_breached', {
+                    'type': f'{period}_threshold_breached',
+                    'agent': 'main',
+                    'cost_usd': round(spent, 4),
+                    'threshold': round(limit, 4),
+                    'timestamp': now,
+                    'message': f'{period.capitalize()} cost threshold breached: ${spent:.2f} / ${limit:.2f}',
+                })
 
         # Warning alert
         if pct >= warning_pct and pct < pause_pct:
@@ -5883,11 +5898,19 @@ def _send_telegram_alert(message):
         pass
 
 
-def _send_webhook_alert(url, alert_data):
-    """Send alert to a webhook URL."""
+def _send_webhook_alert(url, alert_data, payload_type='generic'):
+    """Send alert to a webhook URL (generic JSON, Slack, or Discord)."""
     try:
         import urllib.request as _ur
-        payload = json.dumps(alert_data).encode()
+        if payload_type == 'discord':
+            content = alert_data.get('message') or f"[{alert_data.get('type', 'alert')}] cost=${alert_data.get('cost_usd', 0)} threshold=${alert_data.get('threshold', 0)}"
+            body = {'content': content}
+        elif payload_type == 'slack':
+            text = alert_data.get('message') or f"[{alert_data.get('type', 'alert')}] cost=${alert_data.get('cost_usd', 0)} threshold=${alert_data.get('threshold', 0)}"
+            body = {'text': text}
+        else:
+            body = alert_data
+        payload = json.dumps(body).encode()
         req = _ur.Request(url, data=payload, headers={'Content-Type': 'application/json'}, method='POST')
         _ur.urlopen(req, timeout=10)
     except Exception:
