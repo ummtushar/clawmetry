@@ -22815,17 +22815,48 @@ def cmd_uninstall(args):
 
 def _run_server(args):
     import sys as _sys
-    # Windows: reconfigure stdout/stderr to UTF-8 so box-drawing chars and
-    # emoji don't crash with UnicodeEncodeError on CP1252 terminals.
-    # reconfigure() is Python 3.7+ and handles the buffer layer correctly.
+    # Windows: guard against closed/detached stdout/stderr before Flask or
+    # click try to use them.  Two scenarios cause problems:
+    #
+    #   1. pythonw.exe / Start-Process / GUI launchers close the standard
+    #      handles at startup.  click._winconsole._is_console() calls
+    #      f.fileno() on sys.stdout, which raises:
+    #        ValueError: I/O operation on closed file
+    #      (reported in GH#264, reproduced on Python 3.11 Windows 10/11)
+    #
+    #   2. Normal CMD terminal with CP1252 encoding: box-drawing chars and
+    #      emoji crash with UnicodeEncodeError.
+    #
+    # Strategy:
+    #   a) Try fileno() first — if it raises, the stream is closed/detached;
+    #      replace with a devnull sink so click/Flask banners never crash.
+    #   b) If the stream is open, reconfigure() to UTF-8 (Python 3.7+).
     if _sys.platform == 'win32':
+        import io as _io
         for _attr in ('stdout', 'stderr'):
             _stream = getattr(_sys, _attr, None)
-            if _stream is not None:
+            if _stream is None:
+                # Completely absent — attach a null sink
                 try:
-                    _stream.reconfigure(encoding='utf-8', errors='replace')
-                except (AttributeError, Exception):
-                    pass
+                    setattr(_sys, _attr, open(os.devnull, 'w', encoding='utf-8'))
+                except OSError:
+                    setattr(_sys, _attr, _io.StringIO())
+                continue
+            try:
+                _stream.fileno()  # raises ValueError/OSError when closed
+            except (AttributeError, ValueError, OSError):
+                # Stream is closed or has no real file descriptor.
+                # Replace with devnull so click._winconsole never calls fileno().
+                try:
+                    setattr(_sys, _attr, open(os.devnull, 'w', encoding='utf-8'))
+                except OSError:
+                    setattr(_sys, _attr, _io.StringIO())
+                continue
+            # Stream is open — reconfigure to UTF-8 to avoid CP1252 issues.
+            try:
+                _stream.reconfigure(encoding='utf-8', errors='replace')
+            except (AttributeError, Exception):
+                pass
     """Start the Flask server (foreground). Called by foreground mode and cmd_start on unsupported OS."""
     detect_config(args)
     _load_gw_config()

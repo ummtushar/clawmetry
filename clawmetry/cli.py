@@ -814,11 +814,35 @@ def main() -> None:
     import argparse
     from dashboard import main as dashboard_main
 
-    # Python 3.14 on Windows: argparse's color detection calls file.fileno()
-    # on a closed file, raising ValueError. NO_COLOR disables this code path.
-    # https://github.com/python/cpython/issues/127321
+    # Windows: protect against closed/detached stdout/stderr before any library
+    # (argparse colour detection, click._winconsole) calls fileno() on them.
+    #
+    # Scenarios that close standard handles:
+    #   - pythonw.exe: GUI launcher; no console attached at all
+    #   - Start-Process / Task Scheduler: CreateProcess with no console
+    #   - Any launcher that closes handles before exec
+    #
+    # click._winconsole._is_console() calls f.fileno() → ValueError when closed.
+    # NO_COLOR suppresses argparse / click colour paths (Python 3.14+).
+    # We *also* replace closed handles with devnull sinks so later code is safe.
     if sys.platform == "win32":
+        import io as _io
         os.environ.setdefault("NO_COLOR", "1")
+        for _attr in ("stdout", "stderr"):
+            _stream = getattr(sys, _attr, None)
+            if _stream is None:
+                try:
+                    setattr(sys, _attr, open(os.devnull, "w", encoding="utf-8"))
+                except OSError:
+                    setattr(sys, _attr, _io.StringIO())
+                continue
+            try:
+                _stream.fileno()
+            except (AttributeError, ValueError, OSError):
+                try:
+                    setattr(sys, _attr, open(os.devnull, "w", encoding="utf-8"))
+                except OSError:
+                    setattr(sys, _attr, _io.StringIO())
 
     parser = argparse.ArgumentParser(prog="clawmetry", add_help=False)
     sub = parser.add_subparsers(dest="cmd")
