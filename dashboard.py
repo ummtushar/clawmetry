@@ -298,20 +298,26 @@ _fleet_db_lock = threading.Lock()
 def _fleet_db_path():
     """Get path to the fleet SQLite database.
 
-    Default: ~/.clawmetry/fleet.db  (inside the installer's own directory,
-    which curl | bash already creates with correct permissions on macOS/Linux).
-    Falls back to ~/.clawmetry-fleet.db for backwards compat if the dir does
-    not exist (pre-installer environments).
+    Always uses ~/.clawmetry/fleet.db, creating the directory if needed.
+    The curl installer creates ~/.clawmetry/ but we must not rely on that --
+    this function is the authoritative path and ensures the dir exists.
+
+    Falls back to a workspace-relative path when WORKSPACE is set (dev mode).
     """
     if FLEET_DB_PATH:
         return FLEET_DB_PATH
     if WORKSPACE:
         return os.path.join(WORKSPACE, '.clawmetry-fleet.db')
-    # Prefer ~/.clawmetry/fleet.db -- the curl installer creates ~/.clawmetry/
-    # with correct ownership, so this path is always writable after install.
+    # Always use ~/.clawmetry/fleet.db -- create the dir if the installer
+    # has not run yet or this is a fresh pip install without curl | bash.
     preferred_dir = os.path.expanduser('~/.clawmetry')
+    try:
+        os.makedirs(preferred_dir, exist_ok=True)
+    except OSError:
+        pass  # makedirs failed (permissions?), fall through to legacy path
     if os.path.isdir(preferred_dir):
         return os.path.join(preferred_dir, 'fleet.db')
+    # Last resort: legacy flat file in home dir (pre-installer environments)
     return os.path.expanduser('~/.clawmetry-fleet.db')
 
 
@@ -5513,20 +5519,26 @@ _fleet_db_lock = threading.Lock()
 def _fleet_db_path():
     """Get path to the fleet SQLite database.
 
-    Default: ~/.clawmetry/fleet.db  (inside the installer's own directory,
-    which curl | bash already creates with correct permissions on macOS/Linux).
-    Falls back to ~/.clawmetry-fleet.db for backwards compat if the dir does
-    not exist (pre-installer environments).
+    Always uses ~/.clawmetry/fleet.db, creating the directory if needed.
+    The curl installer creates ~/.clawmetry/ but we must not rely on that --
+    this function is the authoritative path and ensures the dir exists.
+
+    Falls back to a workspace-relative path when WORKSPACE is set (dev mode).
     """
     if FLEET_DB_PATH:
         return FLEET_DB_PATH
     if WORKSPACE:
         return os.path.join(WORKSPACE, '.clawmetry-fleet.db')
-    # Prefer ~/.clawmetry/fleet.db -- the curl installer creates ~/.clawmetry/
-    # with correct ownership, so this path is always writable after install.
+    # Always use ~/.clawmetry/fleet.db -- create the dir if the installer
+    # has not run yet or this is a fresh pip install without curl | bash.
     preferred_dir = os.path.expanduser('~/.clawmetry')
+    try:
+        os.makedirs(preferred_dir, exist_ok=True)
+    except OSError:
+        pass  # makedirs failed (permissions?), fall through to legacy path
     if os.path.isdir(preferred_dir):
         return os.path.join(preferred_dir, 'fleet.db')
+    # Last resort: legacy flat file in home dir (pre-installer environments)
     return os.path.expanduser('~/.clawmetry-fleet.db')
 
 
