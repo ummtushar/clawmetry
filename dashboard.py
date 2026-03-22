@@ -1146,14 +1146,6 @@ def _process_otlp_metrics(pb_data):
                             'channel': attrs.get('channel', resource_attrs.get('channel', '')),
                             'type': wtype,
                         })
-                elif name == 'openclaw.queue.lane.depth':
-                    for dp in _get_data_points(metric):
-                        attrs = _get_dp_attrs(dp)
-                        _add_metric('queues', {
-                            'timestamp': ts,
-                            'channel': attrs.get('channel', attrs.get('lane', resource_attrs.get('channel', ''))),
-                            'depth': _get_dp_value(dp),
-                        })
 
 
 def _process_otlp_traces(pb_data):
@@ -2758,11 +2750,8 @@ function clawmetryLogout(){
     <div class="nav-tab active" onclick="switchTab('overview')">Overview</div>
     <div class="nav-tab" onclick="switchTab('crons')">Crons</div>
     <div class="nav-tab" onclick="switchTab('usage')">Tokens</div>
-    <div class="nav-tab" onclick="switchTab('subagents')">Agents</div>
     <div class="nav-tab" onclick="switchTab('memory')">Memory</div>
     <div class="nav-tab" onclick="switchTab('security')">Security</div>
-    <div class="nav-tab" onclick="switchTab('channels')">Channels</div>
-    <div class="nav-tab" onclick="switchTab('context')">Context</div>
     <!-- History tab hidden until mature -->
     <!-- <div class="nav-tab" onclick="switchTab('history')">History</div> -->
   </div>
@@ -3607,149 +3596,7 @@ function clawmetryLogout(){
   </div>
 </div><!-- end page-security -->
 
-<!-- CHANNELS -->
-<div class="page" id="page-channels">
-  <div style="padding:12px 0 8px 0;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-      <span style="font-size:14px;font-weight:700;color:var(--text-primary);">&#128225; Channels</span>
-      <button class="refresh-btn" onclick="loadChannelsPage();">&#8635; Refresh</button>
-    </div>
-    <div id="channels-summary" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px;">
-      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
-        <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="ch-total-count">0</div>
-        <div style="font-size:11px;color:var(--text-muted);">Active Channels</div>
-      </div>
-      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
-        <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="ch-total-messages">0</div>
-        <div style="font-size:11px;color:var(--text-muted);">Total Messages</div>
-      </div>
-      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
-        <div style="font-size:24px;font-weight:700;" id="ch-total-errors" style="color:#22c55e;">0</div>
-        <div style="font-size:11px;color:var(--text-muted);">Webhook Errors</div>
-      </div>
-    </div>
-    <div id="channels-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px;">
-      <div style="color:var(--text-muted);padding:30px;text-align:center;grid-column:1/-1;">Loading channel metrics...</div>
-    </div>
-  </div>
-</div><!-- end page-channels -->
 
-<!-- CONTEXT INSPECTOR (GH #9) -->
-<div class="page" id="page-context">
-  <div class="refresh-bar" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-    <button class="refresh-btn" onclick="loadContextInspector()">&#8635; Refresh</button>
-    <span style="font-size:12px;color:var(--text-muted);">Context coverage &amp; lint for multi-agent workflows</span>
-    <span id="ctx-refresh-time" style="font-size:11px;color:var(--text-muted);margin-left:auto;"></span>
-  </div>
-
-  <!-- Summary stats -->
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;">
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="ctx-total-agents">-</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Total Agents</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;" id="ctx-avg-coverage" style="color:var(--text-primary);">-</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Avg Coverage %</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:#f87171;" id="ctx-total-warnings">-</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Lint Warnings</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:#60a0ff;" id="ctx-files-found">-</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Context Files Found</div>
-    </div>
-  </div>
-
-  <!-- Two-column layout: context files + lint warnings -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
-    <!-- Context Files Card -->
-    <div class="card" style="padding:16px;">
-      <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:10px;">&#128196; Workspace Context Files</div>
-      <div id="ctx-files-list" style="font-size:12px;"></div>
-    </div>
-    <!-- Lint Warnings Card -->
-    <div class="card" style="padding:16px;">
-      <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:10px;">&#9888;&#65039; Lint Warnings</div>
-      <div id="ctx-lint-list" style="font-size:12px;"></div>
-    </div>
-  </div>
-
-  <!-- Agent tree with coverage scores -->
-  <div class="card" style="padding:16px;">
-    <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:10px;">&#129438; Agent Context Tree</div>
-    <div id="ctx-agent-list" style="font-size:12px;"></div>
-  </div>
-</div><!-- end page-context -->
-
-
-<!-- SUB-AGENTS -->
-<div class="page" id="page-subagents">
-  <div class="refresh-bar" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-    <button class="refresh-btn" onclick="loadSubAgentsPage(false)">&#8635; Refresh</button>
-    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
-      <input type="checkbox" id="sa-auto-refresh" onchange="toggleSAAutoRefresh()"> Auto-refresh (5s)
-    </label>
-    <span id="sa-refresh-time" style="font-size:11px;color:var(--text-muted);margin-left:auto;"></span>
-  </div>
-
-  <!-- Stats row -->
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;">
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="subagents-active-count">-</div>
-      <div style="font-size:11px;color:#60ff80;margin-top:4px;">Active</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="subagents-idle-count">-</div>
-      <div style="font-size:11px;color:#f0c040;margin-top:4px;">Idle</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="subagents-stale-count">-</div>
-      <div style="font-size:11px;color:#888;margin-top:4px;">Stale</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="subagents-total-count">-</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Total</div>
-    </div>
-  </div>
-
-  <!-- Status Legend -->
-  <div class="card" style="padding:10px 16px;margin-bottom:12px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
-    <span style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;">Legend</span>
-    <span title="Currently running" style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:default;color:var(--text-secondary);"><span style="width:10px;height:10px;border-radius:50%;background:#4ade80;display:inline-block;flex-shrink:0;"></span>Active &#8212; currently running</span>
-    <span title="Completed successfully" style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:default;color:var(--text-secondary);"><span style="width:10px;height:10px;border-radius:50%;background:#60a0ff;display:inline-block;flex-shrink:0;"></span>Idle &#8212; finished OK</span>
-    <span title="No activity for more than 10 minutes, may be stuck" style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:default;color:var(--text-secondary);"><span style="width:10px;height:10px;border-radius:50%;background:#fb923c;display:inline-block;flex-shrink:0;"></span>Stale &#8212; silent &gt;10 min</span>
-    <span title="Errored out" style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:default;color:var(--text-secondary);"><span style="width:10px;height:10px;border-radius:50%;background:#f87171;display:inline-block;flex-shrink:0;"></span>Failed &#8212; errored</span>
-    <span style="margin-left:auto;font-size:11px;color:var(--text-muted);">Bars = time span &nbsp;&#183;&nbsp; Dashed lines = parent &#8594; child &nbsp;&#183;&nbsp; Click a bar for details</span>
-  </div>
-
-  <!-- Gantt Timeline (primary view) -->
-  <div class="card" style="padding:16px 16px 8px;margin-bottom:12px;overflow-x:auto;" id="sa-gantt">
-    <div style="padding:40px;text-align:center;color:#666;">Loading...</div>
-  </div>
-
-  <!-- Split: list + detail (secondary) -->
-  <div style="display:flex;gap:16px;min-height:260px;">
-    <!-- Left: sub-agents tree list -->
-    <div class="card" style="flex:0 0 360px;overflow-y:auto;padding:0;" id="subagents-list">
-    </div>
-    <!-- Right: activity panel -->
-    <div id="sa-activity-panel" class="card" style="flex:1;display:none;flex-direction:column;padding:0;overflow:hidden;">
-      <div style="padding:16px;border-bottom:1px solid var(--border-primary);display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <div style="font-size:15px;font-weight:700;color:var(--text-primary);" id="sa-panel-title">Sub-Agent</div>
-          <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;" id="sa-panel-status"></div>
-        </div>
-        <button onclick="closeSAPanel()" style="background:var(--button-bg);border:1px solid var(--border-primary);border-radius:8px;width:32px;height:32px;cursor:pointer;font-size:18px;color:var(--text-tertiary);">&times;</button>
-      </div>
-      <div id="sa-activity-timeline" style="flex:1;overflow-y:auto;padding:16px;font-size:12px;font-family:monospace;color:var(--text-secondary);">
-        <div style="padding:20px;text-align:center;color:#666;">Select a sub-agent to see its activity</div>
-      </div>
-    </div>
-  </div>
-</div>
-</div>
 
 <script>
 // === Budget & Alert Functions ===
@@ -4055,11 +3902,8 @@ function switchTab(name) {
   if (name === 'transcripts') loadTranscripts();
   if (name === 'flow') initFlow();
   if (name === 'history') loadHistory();
-  if (name === 'subagents') loadSubAgentsPage(false);
   if (name === 'brain') loadBrainPage();
   if (name === 'security') { loadSecurityPage(); loadSecurityPosture(); }
-  if (name === 'channels') loadChannelsPage();
-  if (name === 'context') loadContextInspector();
   if (name === 'logs') { if (!logStream || logStream.readyState === EventSource.CLOSED) startLogStream(); loadLogs(); }
 }
 
@@ -4666,19 +4510,8 @@ async function loadActivityStream() {
   }
 }
 
-// ===== Sub-Agent Live Activity System =====
-var _saAutoRefreshTimer = null;
-var _saSelectedId = null;
 
-function toggleSAAutoRefresh() {
-  if (document.getElementById('sa-auto-refresh').checked) {
-    _saAutoRefreshTimer = setInterval(function() { loadSubAgentsPage(true); }, 5000);
-  } else {
-    clearInterval(_saAutoRefreshTimer);
-    _saAutoRefreshTimer = null;
-  }
-}
-
+// ── Brain tab
 // ── Brain tab ─────────────────────────────────────────────────────────
 var _brainRefreshTimer = null;
 var _brainSourceColors = {};
@@ -6419,14 +6252,6 @@ def _process_otlp_metrics(pb_data):
                             'channel': attrs.get('channel', resource_attrs.get('channel', '')),
                             'type': wtype,
                         })
-                elif name == 'openclaw.queue.lane.depth':
-                    for dp in _get_data_points(metric):
-                        attrs = _get_dp_attrs(dp)
-                        _add_metric('queues', {
-                            'timestamp': ts,
-                            'channel': attrs.get('channel', attrs.get('lane', resource_attrs.get('channel', ''))),
-                            'depth': _get_dp_value(dp),
-                        })
 
 
 def _process_otlp_traces(pb_data):
@@ -6781,7 +6606,6 @@ def detect_config(args=None):
     app.register_blueprint(bp_sessions)
     app.register_blueprint(bp_usage)
     app.register_blueprint(bp_version)
-    app.register_blueprint(bp_context)
     # ────────────────────────────────────────────────────────────────────────
 
 
@@ -8050,11 +7874,8 @@ function clawmetryLogout(){
     <div class="nav-tab active" onclick="switchTab('overview')">Overview</div>
     <div class="nav-tab" onclick="switchTab('crons')">Crons</div>
     <div class="nav-tab" onclick="switchTab('usage')">Tokens</div>
-    <div class="nav-tab" onclick="switchTab('subagents')">Agents</div>
     <div class="nav-tab" onclick="switchTab('memory')">Memory</div>
     <div class="nav-tab" onclick="switchTab('security')">Security</div>
-    <div class="nav-tab" onclick="switchTab('channels')">Channels</div>
-    <div class="nav-tab" onclick="switchTab('context')">Context</div>
     <!-- History tab hidden until mature -->
     <!-- <div class="nav-tab" onclick="switchTab('history')">History</div> -->
   <div id="cloud-cta-btn" onclick="openCloudModal()" style="display:none;margin-left:8px;cursor:pointer;padding:6px 12px;border:1px solid rgba(96,165,250,0.5);border-radius:8px;font-size:12px;font-weight:600;color:#60a5fa;white-space:nowrap;transition:all 0.2s;user-select:none;" onmouseover="this.style.background='rgba(96,165,250,0.1)'" onmouseout="this.style.background='transparent'"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-right:4px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>Enable Cloud Sync</div>
@@ -8943,150 +8764,8 @@ function clawmetryLogout(){
   </div>
 </div><!-- end page-security -->
 
-<!-- CHANNELS -->
-<div class="page" id="page-channels">
-  <div style="padding:12px 0 8px 0;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-      <span style="font-size:14px;font-weight:700;color:var(--text-primary);">&#128225; Channels</span>
-      <button class="refresh-btn" onclick="loadChannelsPage();">&#8635; Refresh</button>
-    </div>
-    <div id="channels-summary" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px;">
-      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
-        <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="ch-total-count">0</div>
-        <div style="font-size:11px;color:var(--text-muted);">Active Channels</div>
-      </div>
-      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
-        <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="ch-total-messages">0</div>
-        <div style="font-size:11px;color:var(--text-muted);">Total Messages</div>
-      </div>
-      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
-        <div style="font-size:24px;font-weight:700;" id="ch-total-errors" style="color:#22c55e;">0</div>
-        <div style="font-size:11px;color:var(--text-muted);">Webhook Errors</div>
-      </div>
-    </div>
-    <div id="channels-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px;">
-      <div style="color:var(--text-muted);padding:30px;text-align:center;grid-column:1/-1;">Loading channel metrics...</div>
-    </div>
-  </div>
-</div><!-- end page-channels -->
-
-<!-- CONTEXT INSPECTOR (GH #9) -->
-<div class="page" id="page-context">
-  <div class="refresh-bar" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-    <button class="refresh-btn" onclick="loadContextInspector()">&#8635; Refresh</button>
-    <span style="font-size:12px;color:var(--text-muted);">Context coverage &amp; lint for multi-agent workflows</span>
-    <span id="ctx-refresh-time" style="font-size:11px;color:var(--text-muted);margin-left:auto;"></span>
-  </div>
-
-  <!-- Summary stats -->
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;">
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="ctx-total-agents">-</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Total Agents</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;" id="ctx-avg-coverage" style="color:var(--text-primary);">-</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Avg Coverage %</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:#f87171;" id="ctx-total-warnings">-</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Lint Warnings</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:#60a0ff;" id="ctx-files-found">-</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Context Files Found</div>
-    </div>
-  </div>
-
-  <!-- Two-column layout: context files + lint warnings -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
-    <!-- Context Files Card -->
-    <div class="card" style="padding:16px;">
-      <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:10px;">&#128196; Workspace Context Files</div>
-      <div id="ctx-files-list" style="font-size:12px;"></div>
-    </div>
-    <!-- Lint Warnings Card -->
-    <div class="card" style="padding:16px;">
-      <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:10px;">&#9888;&#65039; Lint Warnings</div>
-      <div id="ctx-lint-list" style="font-size:12px;"></div>
-    </div>
-  </div>
-
-  <!-- Agent tree with coverage scores -->
-  <div class="card" style="padding:16px;">
-    <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:10px;">&#129438; Agent Context Tree</div>
-    <div id="ctx-agent-list" style="font-size:12px;"></div>
-  </div>
-</div><!-- end page-context -->
 
 
-
-<!-- SUB-AGENTS -->
-<div class="page" id="page-subagents">
-  <div class="refresh-bar" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-    <button class="refresh-btn" onclick="loadSubAgentsPage(false)">&#8635; Refresh</button>
-    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
-      <input type="checkbox" id="sa-auto-refresh" onchange="toggleSAAutoRefresh()"> Auto-refresh (5s)
-    </label>
-    <span id="sa-refresh-time" style="font-size:11px;color:var(--text-muted);margin-left:auto;"></span>
-  </div>
-
-  <!-- Stats row -->
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;">
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="subagents-active-count">-</div>
-      <div style="font-size:11px;color:#60ff80;margin-top:4px;">Active</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="subagents-idle-count">-</div>
-      <div style="font-size:11px;color:#f0c040;margin-top:4px;">Idle</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="subagents-stale-count">-</div>
-      <div style="font-size:11px;color:#888;margin-top:4px;">Stale</div>
-    </div>
-    <div class="card" style="padding:14px;text-align:center;">
-      <div style="font-size:24px;font-weight:700;color:var(--text-primary);" id="subagents-total-count">-</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Total</div>
-    </div>
-  </div>
-
-  <!-- Status Legend -->
-  <div class="card" style="padding:10px 16px;margin-bottom:12px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
-    <span style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;">Legend</span>
-    <span title="Currently running" style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:default;color:var(--text-secondary);"><span style="width:10px;height:10px;border-radius:50%;background:#4ade80;display:inline-block;flex-shrink:0;"></span>Active &#8212; currently running</span>
-    <span title="Completed successfully" style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:default;color:var(--text-secondary);"><span style="width:10px;height:10px;border-radius:50%;background:#60a0ff;display:inline-block;flex-shrink:0;"></span>Idle &#8212; finished OK</span>
-    <span title="No activity for more than 10 minutes, may be stuck" style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:default;color:var(--text-secondary);"><span style="width:10px;height:10px;border-radius:50%;background:#fb923c;display:inline-block;flex-shrink:0;"></span>Stale &#8212; silent &gt;10 min</span>
-    <span title="Errored out" style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:default;color:var(--text-secondary);"><span style="width:10px;height:10px;border-radius:50%;background:#f87171;display:inline-block;flex-shrink:0;"></span>Failed &#8212; errored</span>
-    <span style="margin-left:auto;font-size:11px;color:var(--text-muted);">Bars = time span &nbsp;&#183;&nbsp; Dashed lines = parent &#8594; child &nbsp;&#183;&nbsp; Click a bar for details</span>
-  </div>
-
-  <!-- Gantt Timeline (primary view) -->
-  <div class="card" style="padding:16px 16px 8px;margin-bottom:12px;overflow-x:auto;" id="sa-gantt">
-    <div style="padding:40px;text-align:center;color:#666;">Loading...</div>
-  </div>
-
-  <!-- Split: list + detail (secondary) -->
-  <div style="display:flex;gap:16px;min-height:260px;">
-    <!-- Left: sub-agents tree list -->
-    <div class="card" style="flex:0 0 360px;overflow-y:auto;padding:0;" id="subagents-list">
-    </div>
-    <!-- Right: activity panel -->
-    <div id="sa-activity-panel" class="card" style="flex:1;display:none;flex-direction:column;padding:0;overflow:hidden;">
-      <div style="padding:16px;border-bottom:1px solid var(--border-primary);display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <div style="font-size:15px;font-weight:700;color:var(--text-primary);" id="sa-panel-title">Sub-Agent</div>
-          <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;" id="sa-panel-status"></div>
-        </div>
-        <button onclick="closeSAPanel()" style="background:var(--button-bg);border:1px solid var(--border-primary);border-radius:8px;width:32px;height:32px;cursor:pointer;font-size:18px;color:var(--text-tertiary);">&times;</button>
-      </div>
-      <div id="sa-activity-timeline" style="flex:1;overflow-y:auto;padding:16px;font-size:12px;font-family:monospace;color:var(--text-secondary);">
-        <div style="padding:20px;text-align:center;color:#666;">Select a sub-agent to see its activity</div>
-      </div>
-    </div>
-  </div>
-</div>
-</div>
 
 <script>
 // === Budget & Alert Functions ===
@@ -9448,11 +9127,8 @@ function switchTab(name) {
   if (name === 'transcripts') loadTranscripts();
   if (name === 'flow') initFlow();
   if (name === 'history') loadHistory();
-  if (name === 'subagents') loadSubAgentsPage(false);
   if (name === 'brain') loadBrainPage();
   if (name === 'security') { loadSecurityPage(); loadSecurityPosture(); }
-  if (name === 'channels') loadChannelsPage();
-  if (name === 'context') loadContextInspector();
   if (name === 'logs') { if (!logStream || logStream.readyState === EventSource.CLOSED) startLogStream(); loadLogs(); }
 }
 
@@ -10024,19 +9700,8 @@ async function loadActivityStream() {
   }
 }
 
-// ===== Sub-Agent Live Activity System =====
-var _saAutoRefreshTimer = null;
-var _saSelectedId = null;
 
-function toggleSAAutoRefresh() {
-  if (document.getElementById('sa-auto-refresh').checked) {
-    _saAutoRefreshTimer = setInterval(function() { loadSubAgentsPage(true); }, 5000);
-  } else {
-    clearInterval(_saAutoRefreshTimer);
-    _saAutoRefreshTimer = null;
-  }
-}
-
+// ── Brain tab
 // ── Brain tab ─────────────────────────────────────────────────────────
 var _brainRefreshTimer = null;
 var _brainSourceColors = {};
@@ -10535,432 +10200,10 @@ async function loadSecurityPage(silent) {
   }
 }
 
-var _channelsRefreshTimer = null;
-async function loadChannelsPage() {
-  try {
-    var data = await fetchJsonWithTimeout('/api/channel-metrics', 10000);
-    var channels = data.channels || [];
-    document.getElementById('ch-total-count').textContent = channels.length;
-    var totalMsgs = 0, totalErrors = 0;
-    channels.forEach(function(c) { totalMsgs += c.messages; totalErrors += c.webhook_errors; });
-    document.getElementById('ch-total-messages').textContent = totalMsgs;
-    var errEl = document.getElementById('ch-total-errors');
-    errEl.textContent = totalErrors;
-    errEl.style.color = totalErrors > 0 ? '#ef4444' : '#22c55e';
 
-    var grid = document.getElementById('channels-grid');
-    if (channels.length === 0) {
-      grid.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted);grid-column:1/-1;"><div style="font-size:48px;margin-bottom:16px;">&#128225;</div><div style="font-size:16px;">No Channel Data Yet</div><div style="font-size:12px;margin-top:8px;">Channel metrics will appear here when OTLP data is being received from your OpenClaw gateway.</div></div>';
-      return;
-    }
 
-    var html = '';
-    channels.forEach(function(c) {
-      var errColor = c.webhook_error_rate > 5 ? '#ef4444' : c.webhook_error_rate > 1 ? '#f59e0b' : '#22c55e';
-      var qColor = c.queue_depth > 50 ? '#ef4444' : c.queue_depth > 10 ? '#f59e0b' : '#22c55e';
-      var channelIcon = {'telegram':'&#9992;','discord':'&#128172;','signal':'&#128274;','whatsapp':'&#128172;','slack':'&#35;','irc':'&#62;','webchat':'&#127760;','imessage':'&#128172;','googlechat':'&#128172;'}[c.channel] || '&#128225;';
 
-      html += '<div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:10px;padding:16px;">';
-      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">';
-      html += '<span style="font-size:20px;">' + channelIcon + '</span>';
-      html += '<span style="font-size:14px;font-weight:700;color:var(--text-primary);text-transform:capitalize;">' + escHtml(c.channel) + '</span>';
-      if (c.queue_depth > 0) html += '<span style="margin-left:auto;font-size:11px;padding:2px 8px;border-radius:10px;background:' + qColor + '20;color:' + qColor + ';font-weight:600;">Queue: ' + c.queue_depth + '</span>';
-      html += '</div>';
 
-      // Stats grid
-      html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">';
-      // Messages
-      html += '<div style="background:var(--bg-primary);border-radius:6px;padding:8px 10px;">';
-      html += '<div style="font-size:18px;font-weight:700;color:var(--text-primary);">' + c.messages + '</div>';
-      html += '<div style="font-size:10px;color:var(--text-muted);">Messages</div>';
-      if (c.message_p50 > 0) html += '<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">p50: ' + c.message_p50 + 'ms / p99: ' + c.message_p99 + 'ms</div>';
-      html += '</div>';
-      // Tokens
-      html += '<div style="background:var(--bg-primary);border-radius:6px;padding:8px 10px;">';
-      html += '<div style="font-size:18px;font-weight:700;color:var(--text-primary);">' + (c.tokens > 1000 ? Math.round(c.tokens/1000) + 'K' : c.tokens) + '</div>';
-      html += '<div style="font-size:10px;color:var(--text-muted);">Tokens</div>';
-      if (c.cost > 0) html += '<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">$' + c.cost.toFixed(4) + '</div>';
-      html += '</div>';
-      html += '</div>';
-
-      // Webhook stats
-      html += '<div style="display:flex;gap:12px;align-items:center;padding:6px 0;border-top:1px solid var(--border);">';
-      html += '<div style="font-size:11px;color:var(--text-muted);">Webhooks:</div>';
-      html += '<span style="font-size:11px;color:var(--text-primary);">' + c.webhook_received + ' received</span>';
-      html += '<span style="font-size:11px;color:' + errColor + ';font-weight:600;">' + c.webhook_errors + ' errors (' + c.webhook_error_rate + '%)</span>';
-      html += '</div>';
-
-      // Run stats
-      if (c.runs > 0) {
-        html += '<div style="display:flex;gap:12px;align-items:center;padding:6px 0;border-top:1px solid var(--border);">';
-        html += '<div style="font-size:11px;color:var(--text-muted);">Runs:</div>';
-        html += '<span style="font-size:11px;color:var(--text-primary);">' + c.runs + ' total</span>';
-        html += '<span style="font-size:11px;color:var(--text-muted);">p50: ' + c.run_p50 + 'ms / p99: ' + c.run_p99 + 'ms</span>';
-        html += '</div>';
-      }
-
-      html += '</div>';
-    });
-    grid.innerHTML = html;
-  } catch(e) {
-    document.getElementById('channels-grid').innerHTML = '<div style="color:var(--text-error);padding:20px;grid-column:1/-1;">Failed to load channel metrics: ' + escHtml(String(e)) + '</div>';
-  }
-
-  if (_channelsRefreshTimer) clearTimeout(_channelsRefreshTimer);
-  if (document.getElementById('page-channels') && document.getElementById('page-channels').classList.contains('active')) {
-    _channelsRefreshTimer = setTimeout(loadChannelsPage, 30000);
-  }
-}
-
-async function loadContextInspector() {
-  try {
-    var data = await fetch('/api/context-inspector').then(function(r){return r.json();});
-    if (data.error) throw new Error(data.error);
-
-    var s = data.summary || {};
-    document.getElementById('ctx-total-agents').textContent = s.totalAgents || 0;
-
-    var avgEl = document.getElementById('ctx-avg-coverage');
-    var avg = s.avgCoverage || 0;
-    avgEl.textContent = avg + '%';
-    avgEl.style.color = avg >= 70 ? '#4ade80' : avg >= 40 ? '#f0c040' : '#f87171';
-
-    document.getElementById('ctx-total-warnings').textContent = s.totalWarnings || 0;
-    document.getElementById('ctx-files-found').textContent = (s.contextFilesFound || 0) + ' / ' + (data.contextFiles || []).length;
-
-    // Context files list
-    var filesHtml = '';
-    (data.contextFiles || []).forEach(function(f) {
-      var icon = f.exists ? '&#9989;' : '&#10060;';
-      var clr = f.exists ? 'var(--text-primary)' : '#888';
-      var size = f.exists ? ' <span style="color:#888;">(' + f.sizeKB + ' KB)</span>' : ' <span style="color:#666;">missing</span>';
-      filesHtml += '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--bg-border);">' +
-        '<span>' + icon + '</span><span style="flex:1;color:' + clr + ';">' + f.name + '</span>' + size + '</div>';
-    });
-    var memCt = s.memoryFileCount || 0;
-    filesHtml += '<div style="margin-top:8px;font-size:11px;color:#888;">memory/ — ' + memCt + ' file' + (memCt !== 1 ? 's' : '') + '</div>';
-    document.getElementById('ctx-files-list').innerHTML = filesHtml || '<span style="color:#666;">No workspace files found</span>';
-
-    // Lint warnings
-    var lintHtml = '';
-    (data.lintWarnings || []).forEach(function(w) {
-      var sev = w.severity || 'info';
-      var sevColor = sev === 'error' ? '#f87171' : sev === 'warn' ? '#f0c040' : '#60a0ff';
-      var sevIcon = sev === 'error' ? '&#128308;' : sev === 'warn' ? '&#128993;' : '&#128309;';
-      lintHtml += '<div style="display:flex;gap:6px;padding:5px 0;border-bottom:1px solid var(--bg-border);align-items:flex-start;">' +
-        '<span style="flex-shrink:0;">' + sevIcon + '</span>' +
-        '<span style="color:' + sevColor + ';font-size:11px;">' + w.message + '</span>' +
-        '</div>';
-    });
-    document.getElementById('ctx-lint-list').innerHTML = lintHtml || '<div style="color:#4ade80;font-size:12px;padding:8px 0;">&#10003; No lint warnings</div>';
-
-    // Agent tree
-    var agentHtml = '';
-    (data.agents || []).sort(function(a, b) { return (b.lastActiveMs || 0) - (a.lastActiveMs || 0); }).forEach(function(a) {
-      var cov = a.coverageScore || 0;
-      var covColor = cov >= 70 ? '#4ade80' : cov >= 40 ? '#f0c040' : '#f87171';
-      var indent = (a.depth || 0) * 20;
-      var tag = a.depth > 0 ? '<span style="font-size:10px;background:rgba(168,85,247,0.2);color:#a855f7;border-radius:3px;padding:1px 5px;margin-right:6px;">sub</span>' : '';
-      var missing = (a.missingContextFiles || []).length > 0 ?
-        '<span style="font-size:10px;color:#f87171;margin-left:6px;">missing: ' + a.missingContextFiles.join(', ') + '</span>' : '';
-      var task = a.spawnTaskSnippet ? '<div style="margin-top:4px;font-size:11px;color:#888;white-space:pre-wrap;">' + a.spawnTaskSnippet.replace(/</g,'&lt;').substring(0, 200) + (a.spawnTaskSnippet.length > 200 ? '…' : '') + '</div>' : '';
-      agentHtml += '<div style="padding:8px 4px 8px ' + (8 + indent) + 'px;border-bottom:1px solid var(--bg-border);">' +
-        '<div style="display:flex;align-items:center;gap:8px;">' +
-        tag +
-        '<span style="font-weight:600;color:var(--text-primary);">' + a.displayName + '</span>' +
-        missing +
-        '<span style="margin-left:auto;font-size:12px;font-weight:700;color:' + covColor + ';">' + cov + '%</span>' +
-        '</div>' + task + '</div>';
-    });
-    document.getElementById('ctx-agent-list').innerHTML = agentHtml || '<div style="padding:16px;text-align:center;color:#666;">No sessions found</div>';
-
-    document.getElementById('ctx-refresh-time').textContent = 'Updated ' + new Date().toLocaleTimeString();
-  } catch(e) {
-    document.getElementById('ctx-agent-list').innerHTML = '<div style="padding:16px;color:#f87171;">Error: ' + e.message + '</div>';
-  }
-}
-
-async function loadSubAgentsPage(silent) {
-  try {
-    var data = await fetch('/api/subagents').then(function(r){return r.json();});
-    var counts = data.counts;
-    var subagents = data.subagents;
-    var now = Date.now();
-
-    document.getElementById('subagents-active-count').textContent = counts.active;
-    document.getElementById('subagents-idle-count').textContent = counts.idle;
-    document.getElementById('subagents-stale-count').textContent = counts.stale;
-    document.getElementById('subagents-total-count').textContent = counts.total;
-    document.getElementById('sa-refresh-time').textContent = 'Updated ' + new Date().toLocaleTimeString();
-
-    if (subagents.length === 0) {
-      var emptyHtml = '<div style="padding:40px;text-align:center;color:#666;"><div style="font-size:48px;margin-bottom:16px;">🐝</div><div style="font-size:16px;">No Sub-Agents Yet</div><div style="font-size:12px;margin-top:8px;max-width:360px;margin-left:auto;margin-right:auto;">Sub-agents are spawned by the main AI to handle complex tasks. They\'ll appear here when active.</div></div>';
-      document.getElementById('sa-gantt').innerHTML = emptyHtml;
-      document.getElementById('subagents-list').innerHTML = '';
-      return;
-    }
-
-    // Compute timing
-    subagents.forEach(function(a) {
-      a._start = a.updatedAt - a.runtimeMs;
-      a._end = (a.status === 'active') ? now : a.updatedAt;
-    });
-    var tMin = Math.min.apply(null, subagents.map(function(a){return a._start;}));
-    var tMax = Math.max.apply(null, subagents.map(function(a){return a._end;}));
-    var tRange = tMax - tMin;
-    if (tRange < 2000) tRange = 2000;
-
-    // Build parent-child tree using spawnedBy field
-    var byKey = {};
-    subagents.forEach(function(a) { byKey[a.key] = a; });
-    var children = {};
-    var roots = [];
-    subagents.forEach(function(a) {
-      var parent = byKey[a.spawnedBy];
-      if (parent) {
-        if (!children[parent.key]) children[parent.key] = [];
-        children[parent.key].push(a);
-      } else {
-        roots.push(a);
-      }
-    });
-
-    // Flatten in tree order (DFS, sorted by start time)
-    var ordered = [];
-    function flatten(agent, depth) {
-      ordered.push({agent: agent, depth: depth});
-      var kids = (children[agent.key] || []).slice().sort(function(a,b){return a._start - b._start;});
-      kids.forEach(function(c) { flatten(c, depth + 1); });
-    }
-    roots.slice().sort(function(a,b){return a._start - b._start;}).forEach(function(r){ flatten(r, 0); });
-
-    var statusColor = {active:'#4ade80', idle:'#60a0ff', stale:'#fb923c', failed:'#f87171'};
-
-    // ===== GANTT SVG =====
-    var svgW = 900;
-    var rowH = 40;
-    var labelW = 185;
-    var axisH = 28;
-    var padTop = 8;
-    var svgH = ordered.length * rowH + axisH + padTop;
-
-    var svg = '<svg width="100%" viewBox="0 0 ' + svgW + ' ' + svgH + '" xmlns="http://www.w3.org/2000/svg" style="display:block;">';
-
-    // Time axis gridlines + labels
-    var tickCount = 7;
-    for (var ti = 0; ti <= tickCount; ti++) {
-      var tx = labelW + (svgW - labelW - 10) * ti / tickCount;
-      var tMs = tMin + tRange * ti / tickCount;
-      var tSec = Math.round((tMs - tMin) / 1000);
-      var tLabel = tSec === 0 ? '0s' : tSec < 60 ? tSec + 's' : (Math.floor(tSec/60)) + 'm' + (tSec % 60 > 0 ? (tSec % 60) + 's' : '');
-      svg += '<line x1="' + tx.toFixed(1) + '" y1="' + padTop + '" x2="' + tx.toFixed(1) + '" y2="' + (svgH - axisH) + '" stroke="#2a2a2a" stroke-width="1"/>';
-      svg += '<text x="' + tx.toFixed(1) + '" y="' + (svgH - axisH + 16) + '" text-anchor="middle" font-size="10" fill="#555">' + tLabel + '</text>';
-    }
-    // Axis baseline
-    svg += '<line x1="' + labelW + '" y1="' + (svgH - axisH) + '" x2="' + (svgW - 10) + '" y2="' + (svgH - axisH) + '" stroke="#333" stroke-width="1"/>';
-
-    // "Now" marker if any agent is active
-    if (counts.active > 0) {
-      var nowX = labelW + (now - tMin) / tRange * (svgW - labelW - 10);
-      if (nowX > labelW && nowX < svgW - 10) {
-        svg += '<line x1="' + nowX.toFixed(1) + '" y1="' + padTop + '" x2="' + nowX.toFixed(1) + '" y2="' + (svgH - axisH) + '" stroke="#4ade80" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.5"/>';
-        svg += '<text x="' + nowX.toFixed(1) + '" y="' + (padTop - 2) + '" text-anchor="middle" font-size="9" fill="#4ade80" opacity="0.7">now</text>';
-      }
-    }
-
-    // Parent-child connector lines
-    ordered.forEach(function(item, i) {
-      var agent = item.agent;
-      var kids = children[agent.key] || [];
-      if (kids.length === 0) return;
-      kids.forEach(function(child) {
-        var ci = -1;
-        for (var x = 0; x < ordered.length; x++) { if (ordered[x].agent.key === child.key) { ci = x; break; } }
-        if (ci < 0) return;
-        var spawnX = labelW + (child._start - tMin) / tRange * (svgW - labelW - 10);
-        var parentY = padTop + i * rowH + rowH / 2;
-        var childY = padTop + ci * rowH + rowH / 2;
-        svg += '<line x1="' + spawnX.toFixed(1) + '" y1="' + parentY.toFixed(1) + '" x2="' + spawnX.toFixed(1) + '" y2="' + childY.toFixed(1) + '" stroke="#505080" stroke-width="1.5" stroke-dasharray="4,3"/>';
-        svg += '<circle cx="' + spawnX.toFixed(1) + '" cy="' + parentY.toFixed(1) + '" r="3" fill="#505080"/>';
-        svg += '<circle cx="' + spawnX.toFixed(1) + '" cy="' + childY.toFixed(1) + '" r="2.5" fill="#505080"/>';
-      });
-    });
-
-    // Agent rows
-    ordered.forEach(function(item, i) {
-      var agent = item.agent;
-      var color = statusColor[agent.status] || '#888';
-      var y = padTop + i * rowH;
-      var isRoot = item.depth === 0;
-      var barThick = isRoot ? 18 : 14;
-      var barY = y + (rowH - barThick) / 2;
-      var barX = labelW + (agent._start - tMin) / tRange * (svgW - labelW - 10);
-      var barW = Math.max(6, (agent._end - agent._start) / tRange * (svgW - labelW - 10));
-      var isSelected = _saSelectedId === agent.sessionId;
-
-      // Row bg (alternating + selected highlight)
-      var rowBg = isSelected ? 'rgba(96,160,255,0.08)' : (i % 2 === 0 ? 'rgba(255,255,255,0.015)' : 'transparent');
-      svg += '<rect x="0" y="' + y + '" width="' + svgW + '" height="' + rowH + '" fill="' + rowBg + '"/>';
-
-      // Depth indent guide
-      if (item.depth > 0) {
-        var indentX = 4 + item.depth * 10;
-        svg += '<line x1="' + indentX + '" y1="' + (y + 4) + '" x2="' + indentX + '" y2="' + (y + rowH - 4) + '" stroke="#333" stroke-width="1"/>';
-      }
-
-      // Label (truncated)
-      var labelIndent = 4 + item.depth * 10;
-      var maxLabelChars = isRoot ? 22 : 20;
-      var label = agent.displayName || agent.sessionId || 'agent';
-      var displayLabel = label.length > maxLabelChars ? label.substring(0, maxLabelChars - 1) + '\u2026' : label;
-      svg += '<text x="' + (labelIndent + (isRoot ? 0 : 8)) + '" y="' + (y + rowH/2 + 4) + '" font-size="' + (isRoot ? '12' : '11') + '" font-weight="' + (isRoot ? '600' : '400') + '" fill="' + (agent.status === 'active' ? '#ddd' : '#999') + '">';
-      svg += '<title>' + escHtml(agent.displayName) + ' (' + agent.status + ') ' + agent.runtime + (agent.lastText ? ' | ' + escHtml(agent.lastText.substring(0,100)) : '') + '</title>';
-      svg += escHtml(displayLabel);
-      svg += '</text>';
-
-      // Gantt bar (clickable)
-      var kidCount = (children[agent.key] || []).length;
-      var escapedName = agent.displayName.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-      svg += '<rect x="' + barX.toFixed(1) + '" y="' + barY.toFixed(1) + '" width="' + barW.toFixed(1) + '" height="' + barThick + '" rx="3" fill="' + color + '" opacity="' + (agent.status === 'active' ? '0.85' : '0.55') + '" style="cursor:pointer;" onclick="openSAActivity(\'' + agent.sessionId + '\',\'' + escapedName + '\',\'' + agent.status + '\')">';
-      svg += '<title>' + escHtml(agent.displayName) + ' | ' + agent.status + ' | ' + agent.runtime + (agent.lastText ? '\n' + escHtml(agent.lastText.substring(0,120)) : '') + '</title>';
-      svg += '</rect>';
-
-      // Selected border
-      if (isSelected) {
-        svg += '<rect x="' + barX.toFixed(1) + '" y="' + barY.toFixed(1) + '" width="' + barW.toFixed(1) + '" height="' + barThick + '" rx="3" fill="none" stroke="#60a0ff" stroke-width="1.5"/>';
-      }
-
-      // Active pulse dot
-      if (agent.status === 'active') {
-        var dotX = barX + barW - 5;
-        svg += '<circle cx="' + dotX.toFixed(1) + '" cy="' + (barY + barThick/2).toFixed(1) + '" r="3" fill="white" opacity="0.9"/>';
-      }
-
-      // Children badge
-      if (kidCount > 0) {
-        var bdgX = barX + barW + 6;
-        if (bdgX + 28 < svgW - 5) {
-          svg += '<rect x="' + bdgX.toFixed(1) + '" y="' + (barY + barThick/2 - 7).toFixed(1) + '" width="28" height="14" rx="7" fill="#1e2048"/>';
-          svg += '<text x="' + (bdgX + 14).toFixed(1) + '" y="' + (barY + barThick/2 + 4).toFixed(1) + '" text-anchor="middle" font-size="9" fill="#8888ff">' + kidCount + ' \u25be</text>';
-        }
-      }
-
-      // Bar label (if bar is wide enough)
-      if (barW > 60) {
-        var shortLabel = label.length > 16 ? label.substring(0,14)+'\u2026' : label;
-        svg += '<text x="' + (barX + 5).toFixed(1) + '" y="' + (barY + barThick/2 + 4).toFixed(1) + '" font-size="10" fill="rgba(0,0,0,0.7)" style="pointer-events:none;">' + escHtml(shortLabel) + '</text>';
-      }
-    });
-
-    svg += '</svg>';
-    document.getElementById('sa-gantt').innerHTML = svg;
-
-    // ===== TREE LIST (secondary) =====
-    var listHtml = '';
-    ordered.forEach(function(item) {
-      var agent = item.agent;
-      var isSelected = _saSelectedId === agent.sessionId;
-      var color = statusColor[agent.status] || '#888';
-      var kidCount = (children[agent.key] || []).length;
-      var durationSec = Math.round((agent._end - agent._start) / 1000);
-      var durStr = durationSec < 60 ? durationSec + 's' : Math.floor(durationSec/60) + 'm' + (durationSec%60>0?(durationSec%60)+'s':'');
-      listHtml += '<div class="subagent-row" style="cursor:pointer;padding-left:' + (10 + item.depth * 18) + 'px;' + (isSelected ? 'background:rgba(96,160,255,0.1);border-left:3px solid #60a0ff;' : '') + '" onclick="openSAActivity(\'' + agent.sessionId + '\',\'' + agent.displayName.replace(/'/g,"\\'") + '\',\'' + agent.status + '\')">';
-      listHtml += '<div class="subagent-indicator ' + agent.status + '"></div>';
-      listHtml += '<div class="subagent-info" style="flex:1;min-width:0;">';
-      listHtml += '<div style="display:flex;justify-content:space-between;align-items:center;gap:4px;">';
-      listHtml += '<span style="font-size:' + (item.depth===0?'12':'11') + 'px;font-weight:' + (item.depth===0?'600':'400') + ';color:' + (agent.status==='active'?'#e0e0e0':'#aaa') + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">';
-      listHtml += '<span style="color:' + color + ';margin-right:4px;">&#9679;</span>' + escHtml(agent.displayName);
-      if (kidCount > 0) listHtml += ' <span style="font-size:9px;color:#8888ff;background:#1e2048;padding:1px 5px;border-radius:8px;">' + kidCount + '</span>';
-      listHtml += '</span>';
-      listHtml += '<span style="font-size:10px;color:#666;white-space:nowrap;flex-shrink:0;">' + agent.runtime + ' &nbsp;' + durStr + '</span>';
-      listHtml += '</div>';
-      if (agent.lastText) {
-        listHtml += '<div style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px;">&#128172; ' + escHtml(agent.lastText.substring(0,80)) + '</div>';
-      }
-      listHtml += '</div></div>';
-    });
-    document.getElementById('subagents-list').innerHTML = listHtml || '<div style="padding:20px;text-align:center;color:#666;font-size:12px;">No agents</div>';
-
-    if (_saSelectedId && !silent) { loadSAActivity(_saSelectedId); }
-    if (!_saAutoRefreshTimer && document.getElementById('sa-auto-refresh').checked) {
-      _saAutoRefreshTimer = setInterval(function() { loadSubAgentsPage(true); }, 5000);
-    }
-  } catch(e) {
-    if (!silent) {
-      document.getElementById('sa-gantt').innerHTML = '<div style="padding:20px;color:#e74c3c;text-align:center;">Failed to load: ' + e.message + '</div>';
-    }
-  }
-}
-function openSAActivity(sessionId, name, status) {
-  _saSelectedId = sessionId;
-  document.getElementById('sa-activity-panel').style.display = 'block';
-  document.getElementById('sa-panel-title').textContent = '🐝 ' + name;
-  document.getElementById('sa-panel-status').textContent = status === 'active' ? '🟢 Working' : status === 'idle' ? '🟡 Idle' : '⬜ Done';
-  loadSAActivity(sessionId);
-  // Re-render list to highlight selected
-  loadSubAgentsPage(true);
-}
-
-function closeSAPanel() {
-  _saSelectedId = null;
-  document.getElementById('sa-activity-panel').style.display = 'none';
-  loadSubAgentsPage(true);
-}
-
-async function loadSAActivity(sessionId) {
-  var container = document.getElementById('sa-activity-timeline');
-  try {
-    var data = await fetch('/api/subagent/' + sessionId + '/activity').then(r => r.json());
-    if (!data.events || data.events.length === 0) {
-      container.innerHTML = '<div style="padding:20px;text-align:center;color:#666;">No activity recorded yet</div>';
-      return;
-    }
-
-    var html = '';
-    data.events.forEach(function(evt, i) {
-      var _ets = evt.ts || evt.timestamp || evt._bts || ''; var time = _ets ? new Date(_ets).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
-
-      if (evt.type === 'tool_call') {
-        var color = evt.tool === 'exec' ? '#f0c040' : evt.tool.match(/Read|Write|Edit/) ? '#60a0ff' : evt.tool === 'web_search' ? '#c0a0ff' : evt.tool === 'browser' ? '#40a0b0' : '#50e080';
-        html += '<div style="display:flex;gap:8px;padding:6px 16px;align-items:flex-start;border-left:3px solid ' + color + ';">';
-        html += '<span style="font-size:10px;color:#555;min-width:55px;font-family:monospace;">' + time + '</span>';
-        html += '<span style="font-size:11px;color:' + color + ';font-weight:700;min-width:80px;">⚡ ' + escHtml(evt.tool) + '</span>';
-        html += '<span style="font-size:11px;color:#aaa;font-family:monospace;word-break:break-all;">' + escHtml(evt.input) + '</span>';
-        html += '</div>';
-      } else if (evt.type === 'tool_result') {
-        var resultColor = evt.isError ? '#e04040' : '#2a5a3a';
-        html += '<div style="display:flex;gap:8px;padding:4px 16px 4px 24px;align-items:flex-start;">';
-        html += '<span style="font-size:10px;color:#555;min-width:55px;font-family:monospace;">' + time + '</span>';
-        html += '<span style="font-size:10px;color:' + (evt.isError ? '#e04040' : '#555') + ';min-width:80px;">' + (evt.isError ? '❌ error' : '✓ result') + '</span>';
-        html += '<span style="font-size:10px;color:#666;font-family:monospace;max-height:40px;overflow:hidden;word-break:break-all;">' + escHtml((evt.preview || '').substring(0, 200)) + '</span>';
-        html += '</div>';
-      } else if (evt.type === 'thinking') {
-        html += '<div style="display:flex;gap:8px;padding:8px 16px;align-items:flex-start;border-left:3px solid #50e080;">';
-        html += '<span style="font-size:10px;color:#555;min-width:55px;font-family:monospace;">' + time + '</span>';
-        html += '<span style="font-size:11px;color:#50e080;min-width:80px;">💬 says</span>';
-        html += '<span style="font-size:12px;color:#ccc;">' + escHtml(evt.text) + '</span>';
-        html += '</div>';
-      } else if (evt.type === 'internal_thought') {
-        html += '<div style="display:flex;gap:8px;padding:4px 16px;align-items:flex-start;opacity:0.6;">';
-        html += '<span style="font-size:10px;color:#555;min-width:55px;font-family:monospace;">' + time + '</span>';
-        html += '<span style="font-size:10px;color:#9070d0;min-width:80px;">🧠 thinks</span>';
-        html += '<span style="font-size:10px;color:#888;font-style:italic;">' + escHtml(evt.text) + '</span>';
-        html += '</div>';
-      } else if (evt.type === 'model_change') {
-        html += '<div style="display:flex;gap:8px;padding:4px 16px;align-items:center;opacity:0.5;">';
-        html += '<span style="font-size:10px;color:#555;min-width:55px;font-family:monospace;">' + time + '</span>';
-        html += '<span style="font-size:10px;color:#888;">🔄 Model: ' + escHtml(evt.model) + '</span>';
-        html += '</div>';
-      }
-    });
-
-    container.innerHTML = html;
-    // Auto-scroll to bottom
-    container.scrollTop = container.scrollHeight;
-  } catch(e) {
-    container.innerHTML = '<div style="padding:20px;text-align:center;color:#e74c3c;">Failed to load activity: ' + e.message + '</div>';
-  }
-}
 
 function openDetailView(type) {
   // Navigate to the appropriate tab with detail view
@@ -10971,8 +10214,6 @@ function openDetailView(type) {
     switchTab('usage');
   } else if (type === 'sessions') {
     showSessionsModal();
-  } else if (type === 'subagents') {
-    switchTab('subagents');
   } else if (type === 'tools') {
     switchTab('logs');
   } else {
@@ -16263,7 +15504,6 @@ bp_sessions = _Blueprint('sessions', __name__)
 bp_security = _Blueprint('security', __name__)
 bp_usage = _Blueprint('usage', __name__)
 bp_version = _Blueprint('version', __name__)
-bp_context = _Blueprint('context', __name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Version check & self-update routes ────────────────────────────────────────
@@ -20119,265 +19359,6 @@ def api_transcript_events(session_id):
     return jsonify({'events': events[-500:], 'messageCount': msg_count, 'totalEvents': len(events)})
 
 
-@bp_sessions.route('/api/subagents')
-def api_subagents():
-    """Get sub-agent sessions from sessions.json index (batch read, no N+1)."""
-    sessions_dir = SESSIONS_DIR or os.path.expanduser('~/.openclaw/agents/main/sessions')
-    index_path = os.path.join(sessions_dir, 'sessions.json')
-    subagents = []
-    now = time.time() * 1000
-
-    # Read the authoritative session index
-    try:
-        with open(index_path, 'r') as f:
-            index = json.load(f)
-    except Exception:
-        return jsonify({'subagents': [], 'counts': {'active': 0, 'idle': 0, 'stale': 0, 'total': 0}, 'totalActive': 0})
-
-    # Collect sub-agent entries and their session IDs for batch transcript reading
-    sa_entries = []
-    for key, meta in index.items():
-        if ':subagent:' not in key:
-            continue
-        sa_entries.append((key, meta))
-
-    # Batch: read first+last lines of each transcript for task detection
-    tasks = {}
-    labels = {}
-    for key, meta in sa_entries:
-        sid = meta.get('sessionId', '')
-        if not sid:
-            continue
-        fpath = os.path.join(sessions_dir, f"{sid}.jsonl")
-        if not os.path.exists(fpath):
-            continue
-        try:
-            with open(fpath, 'rb') as f:
-                # Read first few lines for session label
-                first_lines = []
-                for _ in range(10):
-                    line = f.readline()
-                    if not line:
-                        break
-                    first_lines.append(line)
-
-                # Read last ~8KB for recent activity
-                try:
-                    f.seek(0, 2)
-                    fsize = f.tell()
-                    tail_start = max(0, fsize - 8192)
-                    f.seek(tail_start)
-                    tail_data = f.read().decode('utf-8', errors='replace')
-                    tail_lines = tail_data.strip().split('\n')
-                    if tail_start > 0:
-                        tail_lines = tail_lines[1:]  # drop partial first line
-                except Exception:
-                    tail_lines = []
-
-                # Extract label from session spawn message (first user message)
-                label = None
-                for raw in first_lines:
-                    try:
-                        obj = json.loads(raw)
-                        if obj.get('type') == 'message' and obj.get('message', {}).get('role') == 'user':
-                            content = obj['message'].get('content', [])
-                            if isinstance(content, list):
-                                for block in content:
-                                    if block.get('type') == 'text':
-                                        text = block.get('text', '')
-                                        # Extract the label from subagent context
-                                        if 'Label:' in text:
-                                            label = text.split('Label:')[1].split('\n')[0].strip()
-                                        elif len(text) > 20:
-                                            # Use first line as label
-                                            label = text.split('\n')[0][:100]
-                                        break
-                            break
-                    except Exception:
-                        continue
-                if label:
-                    labels[key] = label
-
-                # Extract recent tool calls and activity from tail
-                recent_tools = []
-                last_text = None
-                for raw in reversed(tail_lines[-20:]):
-                    try:
-                        obj = json.loads(raw)
-                        if obj.get('type') != 'message':
-                            continue
-                        msg = obj.get('message', {})
-                        content = msg.get('content', [])
-                        if not isinstance(content, list):
-                            continue
-                        for block in content:
-                            btype = block.get('type', '')
-                            if btype in ('tool_use', 'toolCall') and len(recent_tools) < 5:
-                                tool_name = block.get('name', '?')
-                                tool_input = block.get('input') or block.get('arguments') or {}
-                                summary = _summarize_tool_input(tool_name, tool_input)
-                                recent_tools.append({'name': tool_name, 'summary': summary[:120], 'ts': obj.get('timestamp', '')})
-                            elif btype == 'text' and msg.get('role') == 'assistant' and not last_text:
-                                t = block.get('text', '').strip()
-                                if t and len(t) > 5:
-                                    last_text = t[:200]
-                    except Exception:
-                        continue
-                tasks[key] = {
-                    'recentTools': list(reversed(recent_tools)),
-                    'lastText': last_text,
-                }
-        except Exception:
-            continue
-
-    # Build response
-    for key, meta in sa_entries:
-        uuid = key.split(':')[-1]
-        updated_at = meta.get('updatedAt', 0)
-        sid = meta.get('sessionId', '')
-
-        # Status based on recency
-        age_ms = now - updated_at if updated_at else float('inf')
-        if age_ms < 5 * 60 * 1000:
-            status = 'active'
-        elif age_ms < 30 * 60 * 1000:
-            status = 'idle'
-        else:
-            status = 'stale'
-
-        # Runtime (from first seen to last update)
-        runtime_ms = age_ms if age_ms != float('inf') else 0
-        if runtime_ms < 60000:
-            runtime = f"{int(runtime_ms / 1000)}s ago"
-        elif runtime_ms < 3600000:
-            runtime = f"{int(runtime_ms / 60000)}m ago"
-        elif runtime_ms < 86400000:
-            runtime = f"{int(runtime_ms / 3600000)}h ago"
-        else:
-            runtime = f"{int(runtime_ms / 86400000)}d ago"
-
-        task_info = tasks.get(key, {})
-        # Prefer label from sessions.json metadata, fallback to transcript extraction
-        label = meta.get('label') or labels.get(key, f'Worker {uuid[:8]}')
-
-        subagents.append({
-            'key': key,
-            'uuid': uuid,
-            'sessionId': sid,
-            'displayName': label,
-            'status': status,
-            'runtime': runtime,
-            'runtimeMs': runtime_ms,
-            'updatedAt': updated_at,
-            'recentTools': task_info.get('recentTools', []),
-            'lastText': task_info.get('lastText', ''),
-            'model': meta.get('model', 'unknown'),
-            'channel': meta.get('channel', meta.get('lastChannel', 'agent')),
-            'spawnedBy': meta.get('spawnedBy', ''),
-            'abortedLastRun': meta.get('abortedLastRun', False),
-            'totalTokens': meta.get('totalTokens', 0),
-            'outputTokens': meta.get('outputTokens', 0),
-        })
-
-    subagents.sort(key=lambda x: x['updatedAt'] or 0, reverse=True)
-
-    counts = {
-        'active': sum(1 for s in subagents if s['status'] == 'active'),
-        'idle': sum(1 for s in subagents if s['status'] == 'idle'),
-        'stale': sum(1 for s in subagents if s['status'] == 'stale'),
-        'total': len(subagents),
-    }
-
-    return jsonify({'subagents': subagents, 'counts': counts, 'totalActive': counts['active']})
-
-
-@bp_sessions.route('/api/subagent/<session_id>/activity')
-def api_subagent_activity(session_id):
-    """Stream recent activity from a sub-agent's transcript. Progressive: reads tail only."""
-    sessions_dir = SESSIONS_DIR or os.path.expanduser('~/.openclaw/agents/main/sessions')
-    fpath = os.path.join(sessions_dir, f"{session_id}.jsonl")
-    if not os.path.exists(fpath):
-        return jsonify({'error': 'not found', 'events': []}), 404
-
-    # Read last ~16KB for activity timeline
-    tail_size = int(request.args.get('tail', 16384))
-    events = []
-    try:
-        with open(fpath, 'rb') as f:
-            f.seek(0, 2)
-            fsize = f.tell()
-            start = max(0, fsize - tail_size)
-            f.seek(start)
-            data = f.read().decode('utf-8', errors='replace')
-            lines = data.strip().split('\n')
-            if start > 0:
-                lines = lines[1:]
-
-            for raw in lines:
-                try:
-                    obj = json.loads(raw)
-                    etype = obj.get('type', '')
-                    ts = obj.get('timestamp', '')
-
-                    if etype == 'message':
-                        msg = obj.get('message', {})
-                        role = msg.get('role', '')
-                        content = msg.get('content', [])
-                        if not isinstance(content, list):
-                            continue
-                        for block in content:
-                            btype = block.get('type', '')
-                            if btype in ('tool_use', 'toolCall'):
-                                inp = block.get('input') or block.get('arguments') or {}
-                                events.append({
-                                    'type': 'tool_call',
-                                    'ts': ts,
-                                    'tool': block.get('name', '?'),
-                                    'input': _summarize_tool_input(block.get('name', ''), inp),
-                                })
-                            elif btype in ('tool_result', 'toolResult'):
-                                result_text = ''
-                                sub = block.get('content', '')
-                                if isinstance(sub, list):
-                                    for sb in sub[:1]:
-                                        result_text = sb.get('text', '')[:300]
-                                elif isinstance(sub, str):
-                                    result_text = sub[:300]
-                                events.append({
-                                    'type': 'tool_result',
-                                    'ts': ts,
-                                    'preview': result_text,
-                                    'isError': block.get('is_error', False),
-                                })
-                            elif btype == 'text' and role == 'assistant':
-                                text = block.get('text', '').strip()
-                                if text:
-                                    events.append({
-                                        'type': 'thinking',
-                                        'ts': ts,
-                                        'text': text[:500],
-                                    })
-                            elif btype == 'thinking':
-                                text = block.get('thinking', '').strip()
-                                if text:
-                                    events.append({
-                                        'type': 'internal_thought',
-                                        'ts': ts,
-                                        'text': text[:300],
-                                    })
-                    elif etype == 'model_change':
-                        events.append({
-                            'type': 'model_change',
-                            'ts': ts,
-                            'model': obj.get('modelId', '?'),
-                        })
-                except Exception:
-                    continue
-    except Exception as e:
-        return jsonify({'error': str(e), 'events': []}), 500
-
-    return jsonify({'events': events, 'fileSize': fsize if 'fsize' in dir() else 0})
-
 
 def _summarize_tool_input(name, inp):
     """Create a human-readable one-line summary of a tool call."""
@@ -23276,105 +22257,6 @@ def api_health():
     return jsonify({'checks': checks})
 
 
-@bp_health.route('/api/channel-metrics')
-def api_channel_metrics():
-    """Return per-channel aggregated metrics from OTLP store."""
-    channels = {}
-
-    def _ensure(ch):
-        if not ch:
-            return
-        if ch not in channels:
-            channels[ch] = {
-                'name': ch,
-                'tokens': 0, 'cost': 0.0,
-                'messages': 0, 'message_durations': [],
-                'webhook_received': 0, 'webhook_errors': 0, 'webhook_durations': [],
-                'queue_depths': [],
-                'runs': 0, 'run_durations': [],
-            }
-
-    with _metrics_lock:
-        for e in metrics_store.get('tokens', []):
-            ch = e.get('channel', '')
-            if ch:
-                _ensure(ch)
-                channels[ch]['tokens'] += e.get('total', 0)
-        for e in metrics_store.get('cost', []):
-            ch = e.get('channel', '')
-            if ch:
-                _ensure(ch)
-                channels[ch]['cost'] += e.get('usd', 0)
-        for e in metrics_store.get('runs', []):
-            ch = e.get('channel', '')
-            if ch:
-                _ensure(ch)
-                channels[ch]['runs'] += 1
-                d = e.get('duration_ms', 0)
-                if d:
-                    channels[ch]['run_durations'].append(d)
-        for e in metrics_store.get('messages', []):
-            ch = e.get('channel', '')
-            if ch:
-                _ensure(ch)
-                channels[ch]['messages'] += 1
-                d = e.get('duration_ms', 0)
-                if d:
-                    channels[ch]['message_durations'].append(d)
-        for e in metrics_store.get('webhooks', []):
-            ch = e.get('channel', '')
-            if ch:
-                _ensure(ch)
-                t = e.get('type', '')
-                if t == 'received':
-                    channels[ch]['webhook_received'] += 1
-                elif t == 'error':
-                    channels[ch]['webhook_errors'] += 1
-                elif t == 'duration':
-                    channels[ch]['webhook_durations'].append(e.get('duration_ms', 0))
-        for e in metrics_store.get('queues', []):
-            ch = e.get('channel', '')
-            if ch:
-                _ensure(ch)
-                channels[ch]['queue_depths'].append(e.get('depth', 0))
-
-    result = []
-    for ch, data in sorted(channels.items()):
-        msg_durs = sorted(data['message_durations'])
-        wh_durs = sorted(data['webhook_durations'])
-        run_durs = sorted(data['run_durations'])
-        q_depths = data['queue_depths']
-
-        def _p(arr, pct):
-            if not arr:
-                return 0
-            idx = int(len(arr) * pct / 100)
-            return round(arr[min(idx, len(arr) - 1)], 1)
-
-        wh_total = data['webhook_received'] + data['webhook_errors']
-        wh_error_rate = round(data['webhook_errors'] / wh_total * 100, 1) if wh_total > 0 else 0
-
-        result.append({
-            'channel': ch,
-            'tokens': data['tokens'],
-            'cost': round(data['cost'], 4),
-            'messages': data['messages'],
-            'message_p50': _p(msg_durs, 50),
-            'message_p99': _p(msg_durs, 99),
-            'webhook_received': data['webhook_received'],
-            'webhook_errors': data['webhook_errors'],
-            'webhook_error_rate': wh_error_rate,
-            'webhook_p50': _p(wh_durs, 50),
-            'webhook_p99': _p(wh_durs, 99),
-            'queue_depth': round(q_depths[-1], 1) if q_depths else 0,
-            'queue_depth_avg': round(sum(q_depths) / len(q_depths), 1) if q_depths else 0,
-            'runs': data['runs'],
-            'run_p50': _p(run_durs, 50),
-            'run_p99': _p(run_durs, 99),
-        })
-
-    return jsonify({'channels': result})
-
 
 @bp_health.route('/api/heartbeat-status')
 def api_heartbeat_status():
@@ -23647,15 +22529,6 @@ def api_automation_analysis():
 
 
 # ── Context Inspector (GH #9) ─────────────────────────────────────────
-
-@bp_context.route('/api/context-inspector')
-def api_context_inspector():
-    """Context Inspector: shows context inheritance, coverage scores, and lint warnings
-    for multi-agent workflows.  Reads workspace files + session transcripts.
-    """
-    try:
-        result = _build_context_inspector_data()
-        return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e), 'agents': [], 'lintWarnings': [], 'summary': {}}), 500
 
