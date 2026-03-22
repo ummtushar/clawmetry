@@ -1,3 +1,7 @@
+## v0.12.63 (2026-03-22)
+- fix: robust Ollama detection -- PATH fallback + HTTP ping to localhost:11434
+- feat: sync daemon heartbeat includes ollama status (installed, running, models)
+
 ## [0.12.60] — 2026-03-19
 
 ### Added
