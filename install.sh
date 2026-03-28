@@ -99,7 +99,9 @@ echo ""
 
 # ── NemoClaw detection ───────────────────────────────────────────────────────
 
+NEMOCLAW_DETECTED=0
 if command -v nemoclaw &>/dev/null; then
+  NEMOCLAW_DETECTED=1
   echo -e "  ${BOLD}🟢 NemoClaw detected${NC}"
   echo ""
 
@@ -121,9 +123,33 @@ except Exception:
     echo ""
   fi
 
+  # Step 2: Show sandbox names and connect command
   echo -e "  ${BOLD}Next: set up ClawMetry inside your NemoClaw OpenClaw sandbox${NC}"
-  echo -e "  ${DIM}Open a NemoClaw sandbox shell and run:${NC}"
   echo ""
+
+  # Get sandbox names from nemoclaw list
+  SANDBOX_NAMES=$(nemoclaw list 2>/dev/null | awk '
+    /^  Sandboxes:/ { in_list=1; next }
+    /^  \* = default sandbox/ { in_list=0; next }
+    in_list && /^    [^ ]/ { name=$1; gsub(/\*/, "", name); if (name != "") print name }
+  ' | head -5)
+
+  if [ -n "$SANDBOX_NAMES" ]; then
+    FIRST_SANDBOX=$(echo "$SANDBOX_NAMES" | head -1)
+    echo -e "  ${DIM}Your sandboxes:${NC}"
+    while IFS= read -r sb; do
+      echo -e "    ${DIM}•${NC} $sb"
+    done <<< "$SANDBOX_NAMES"
+    echo ""
+    echo -e "  ${DIM}1. Connect to your sandbox:${NC}"
+    echo -e "    ${GREEN}nemoclaw ${FIRST_SANDBOX} connect${NC}"
+  else
+    echo -e "  ${DIM}1. Connect to your sandbox:${NC}"
+    echo -e "    ${GREEN}nemoclaw <sandbox-name> connect${NC}"
+  fi
+
+  echo ""
+  echo -e "  ${DIM}2. Inside the sandbox, run:${NC}"
   echo -e "    ${GREEN}python3 -m venv .venv${NC}"
   echo -e "    ${GREEN}.venv/bin/pip install clawmetry${NC}"
   echo -e "    ${GREEN}.venv/bin/clawmetry onboard${NC}"
@@ -132,10 +158,10 @@ except Exception:
 fi
 
 # ── Onboarding ───────────────────────────────────────────────────────────────
-# Runs: clawmetry onboard
+# Runs: clawmetry onboard (skipped when NemoClaw is detected — setup happens inside sandbox)
 
-if [ "${CLAWMETRY_SKIP_ONBOARD:-}" = "1" ]; then
-  echo -e "  ${DIM}Skipping onboard (CLAWMETRY_SKIP_ONBOARD=1)${NC}"
+if [ "${CLAWMETRY_SKIP_ONBOARD:-}" = "1" ] || [ "$NEMOCLAW_DETECTED" = "1" ]; then
+  [ "$NEMOCLAW_DETECTED" = "1" ] || echo -e "  ${DIM}Skipping onboard (CLAWMETRY_SKIP_ONBOARD=1)${NC}"
 elif (exec </dev/tty) 2>/dev/null; then
   "$CLAWMETRY_BIN" onboard </dev/tty || true
 else
