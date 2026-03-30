@@ -75,6 +75,23 @@ def _get_claude_projects_dir() -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_model_name(model: str) -> str:
+    """Clean up model names for display.
+
+    Strips ``anthropic/`` prefix and replaces non-model placeholders like
+    ``<synthetic>`` or ``unknown`` with empty string.
+    """
+    if not model:
+        return ""
+    # Strip provider prefix
+    if model.startswith("anthropic/"):
+        model = model[len("anthropic/"):]
+    # Filter non-model placeholders
+    if model in ("<synthetic>", "unknown", "null", "None", ""):
+        return ""
+    return model
+
+
 def _project_display_name(slug: str) -> str:
     """Convert a Claude Code project directory slug to a human-readable name.
 
@@ -254,7 +271,7 @@ def _parse_session(fpath: str) -> Optional[Dict[str, Any]]:
 
                 if evt_type == "assistant":
                     message = obj.get("message") or {}
-                    m = message.get("model")
+                    m = _normalize_model_name(message.get("model", ""))
                     if m:
                         model = m
                     usage = message.get("usage") or {}
@@ -482,7 +499,7 @@ def _parse_transcript_messages(fpath: str) -> Dict[str, Any]:
 
             # ── Assistant events ──────────────────────────────────────
             elif evt_type == "assistant":
-                m = message_obj.get("model")
+                m = _normalize_model_name(message_obj.get("model", ""))
                 if m:
                     model = m
                 usage = message_obj.get("usage") or {}
@@ -901,8 +918,11 @@ tbody tr:hover td{background:var(--surface-hover)}
 .msg .md-content blockquote{border-left:3px solid var(--border);
   padding-left:12px;color:var(--text-secondary);margin:6px 0}
 
+@media(max-width:1100px){
+  .stats{grid-template-columns:repeat(3,1fr)!important}
+  .g2{grid-template-columns:1fr 1fr!important}}
 @media(max-width:768px){
-  .stats{grid-template-columns:repeat(2,1fr)}
+  .stats{grid-template-columns:repeat(2,1fr)!important}
   .stat .val{font-size:1.3rem}
   .g2{grid-template-columns:1fr}
   .modal{padding:18px;width:96%}
@@ -920,7 +940,7 @@ tbody tr:hover td{background:var(--surface-hover)}
 </header>
 
 <div class="container">
-  <div class="stats">
+  <div class="stats" style="grid-template-columns:repeat(6,1fr)">
     <div class="stat"><div class="lbl">Sessions</div>
       <div class="val" id="s-sessions">—</div>
       <div class="sub" id="s-sessions-sub"></div></div>
@@ -928,9 +948,15 @@ tbody tr:hover td{background:var(--surface-hover)}
       <div class="val" id="s-tokens">—</div>
       <div class="sub" id="s-tokens-sub"></div></div>
     <div class="stat c-green"><div class="lbl">Total Cost</div>
-      <div class="val" id="s-cost">—</div></div>
+      <div class="val" id="s-cost">—</div>
+      <div class="sub" id="s-cost-sub"></div></div>
+    <div class="stat"><div class="lbl">Avg Cost / Session</div>
+      <div class="val" id="s-avg">—</div></div>
     <div class="stat c-accent"><div class="lbl">Projects</div>
       <div class="val" id="s-projects">—</div></div>
+    <div class="stat"><div class="lbl">Today</div>
+      <div class="val" id="s-today">—</div>
+      <div class="sub" id="s-today-sub"></div></div>
   </div>
 
   <div class="tabs">
@@ -957,11 +983,17 @@ tbody tr:hover td{background:var(--surface-hover)}
   </div>
 
   <div class="panel" id="panel-analytics">
-    <div class="chart-card">
-      <div class="chart-title">Daily Token Usage</div>
-      <div class="bar-chart" id="ch-daily"></div>
-    </div>
     <div class="g2">
+      <div class="chart-card">
+        <div class="chart-title">Daily Token Usage</div>
+        <div class="bar-chart" id="ch-daily"></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Daily Cost</div>
+        <div class="bar-chart" id="ch-daily-cost"></div>
+      </div>
+    </div>
+    <div class="g2" style="grid-template-columns:1fr 1fr 1fr;margin-top:0">
       <div class="chart-card">
         <div class="chart-title">Model Usage</div>
         <div class="tw"><table><thead><tr><th>Model</th><th style="text-align:right">Tokens</th></tr></thead>
@@ -971,6 +1003,11 @@ tbody tr:hover td{background:var(--surface-hover)}
         <div class="chart-title">Top Tools</div>
         <div class="tw"><table><thead><tr><th>Tool</th><th style="text-align:right">Calls</th></tr></thead>
         <tbody id="ts-tb"></tbody></table></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Project Breakdown</div>
+        <div class="tw"><table><thead><tr><th>Project</th><th style="text-align:right">Sessions</th><th style="text-align:right">Cost</th></tr></thead>
+        <tbody id="pu-tb"></tbody></table></div>
       </div>
     </div>
   </div>
@@ -1005,11 +1042,12 @@ QA('.tab').forEach(function(t){t.addEventListener('click',function(){
 
 var allS=[];
 function fmt(n){if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(n)}
-function fmtC(c){return'$'+c.toFixed(4)}
+function fmtC(c){return'$'+c.toFixed(2)}
 function fmtT(ts){if(!ts)return'—';var d=new Date(ts*1000);
   return d.toLocaleDateString(undefined,{day:'2-digit',month:'short'})+' '+d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}
 function esc(s){var d=D.createElement('div');d.textContent=s||'';return d.innerHTML}
-function sm(m){return(m||'').replace('claude-','').replace(/-202\d+$/,'').substring(0,24)}
+function sm(m){if(!m||m==='unknown'||m==='<synthetic>')return'—';
+  return(m||'').replace('anthropic/','').replace('claude-','').replace(/-202\d+$/,'').substring(0,24)}
 
 // Simple markdown to HTML
 function md(text){
@@ -1090,13 +1128,22 @@ function loadSessions(){
     Q('#s-tokens').textContent=fmt(tt);
     Q('#s-tokens-sub').textContent=tt.toLocaleString()+' tokens';
     Q('#s-cost').textContent=fmtC(tc);
+    Q('#s-cost-sub').textContent=fmt(tt)+' tokens used';
+    Q('#s-avg').textContent=allS.length?fmtC(tc/allS.length):'—';
     Q('#s-projects').textContent=Object.keys(projs).length;
+    // Today's stats
+    var today=new Date().toISOString().slice(0,10);
+    var todayS=allS.filter(function(s){return s.day===today});
+    var todayT=0,todayC=0;
+    todayS.forEach(function(s){todayT+=s.tokens||0;todayC+=s.cost_usd||0});
+    Q('#s-today').textContent=todayS.length+' sessions';
+    Q('#s-today-sub').textContent=fmt(todayT)+' tok · '+fmtC(todayC);
     // Filters (only update if empty)
     var psel=Q('#fp');if(psel.options.length<=1){
       Object.keys(projs).sort().forEach(function(p){var o=D.createElement('option');
         o.value=p;o.textContent=p+' ('+projs[p]+')';psel.appendChild(o)})}
     var msel=Q('#fm');if(msel.options.length<=1){
-      Object.keys(models).sort().forEach(function(m){var o=D.createElement('option');
+      Object.keys(models).filter(function(m){return m!=='unknown'&&m!=='<synthetic>'&&m!==''}).sort().forEach(function(m){var o=D.createElement('option');
         o.value=m;o.textContent=sm(m);msel.appendChild(o)})}
     renderS(allS)})
 }
@@ -1109,29 +1156,58 @@ function loadAnalytics(){
       var h=Math.max(3,(daily[d]/mx)*110);
       return'<div class="bar" style="height:'+h+'px;flex:1"><div class="tip">'+d+'<br>'+fmt(daily[d])+' tokens</div></div>'
     }).join('');
+    // Daily cost chart
+    var dc=data.daily_cost||{},cdays=Object.keys(dc).sort();
+    var mxc=Math.max.apply(null,cdays.map(function(d){return dc[d]}).concat([0.01]));
+    Q('#ch-daily-cost').innerHTML=cdays.slice(-30).map(function(d){
+      var h=Math.max(3,(dc[d]/mxc)*110);
+      return'<div class="bar" style="height:'+h+'px;flex:1;background:var(--green)"><div class="tip">'+d+'<br>$'+dc[d].toFixed(2)+'</div></div>'
+    }).join('');
+    // Model usage (filter unknown)
     var mu=data.model_usage||{};
-    Q('#mu-tb').innerHTML=Object.keys(mu).sort(function(a,b){return mu[b]-mu[a]}).map(function(m){
+    Q('#mu-tb').innerHTML=Object.keys(mu).filter(function(m){return m!=='unknown'&&m!=='<synthetic>'}).sort(function(a,b){return mu[b]-mu[a]}).map(function(m){
       return'<tr style="cursor:default"><td><span class="b b-model">'+esc(sm(m))+'</span></td><td class="tok" style="text-align:right">'+fmt(mu[m])+'</td></tr>'
     }).join('');
+    // Tool stats (already sorted desc from API)
     var ts=data.tool_stats||{};
-    Q('#ts-tb').innerHTML=Object.keys(ts).map(function(t){
+    Q('#ts-tb').innerHTML=Object.keys(ts).sort(function(a,b){return ts[b]-ts[a]}).map(function(t){
       return'<tr style="cursor:default"><td><span class="b b-tool">'+esc(t)+'</span></td><td style="text-align:right;font-weight:600">'+ts[t]+'</td></tr>'
+    }).join('');
+    // Project breakdown
+    var pu=data.project_usage||{};
+    Q('#pu-tb').innerHTML=Object.keys(pu).sort(function(a,b){return pu[b].cost-pu[a].cost}).map(function(p){
+      var d=pu[p];return'<tr style="cursor:default"><td><span class="b b-proj">'+esc(p)+'</span></td><td style="text-align:right">'+d.sessions+'</td><td class="cost" style="text-align:right">'+fmtC(d.cost)+'</td></tr>'
     }).join('')})}
 
 function loadProjects(){
-  fetch('api/projects').then(function(r){return r.json()}).then(function(data){
-    var el=Q('#projects-list'),ps=data.projects||[];
+  // Fetch both projects and analytics for per-project stats
+  Promise.all([
+    fetch('api/projects').then(function(r){return r.json()}),
+    fetch('api/analytics').then(function(r){return r.json()})
+  ]).then(function(results){
+    var ps=results[0].projects||[];
+    var pu=results[1].project_usage||{};
+    var el=Q('#projects-list');
+    // Sort by cost desc
+    ps.sort(function(a,b){return((pu[b.name]||{}).cost||0)-((pu[a.name]||{}).cost||0)});
     el.innerHTML=ps.map(function(p){
+      var stats=pu[p.name]||{tokens:0,cost:0,sessions:0};
       var memHtml='';
       if(p.memory_preview){
-        memHtml='<div class="mem-card">'+mdMem(p.memory_preview)+'</div>'
+        memHtml='<details style="margin-top:12px"><summary style="cursor:pointer;font-size:0.8rem;color:var(--text-secondary);font-weight:600">📝 MEMORY.md</summary>'
+          +'<div class="mem-card">'+mdMem(p.memory_preview)+'</div></details>'
       }
       return'<div class="chart-card" style="margin-bottom:12px">'
-        +'<div style="display:flex;justify-content:space-between;align-items:center">'
-        +'<div><span class="b b-proj" style="font-size:0.85rem">'+esc(p.name)+'</span>'
-        +'<span class="dim sm" style="margin-left:10px;font-family:var(--mono)">'+esc(p.path)+'</span></div>'
-        +'<div><span class="tok">'+p.sessions+' sessions</span>'
-        +(p.has_memory?'<span class="b b-tool" style="margin-left:8px">MEMORY.md</span>':'')+'</div></div>'
+        +'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
+        +'<div style="display:flex;align-items:center;gap:10px">'
+        +'<span class="b b-proj" style="font-size:0.88rem;padding:4px 12px">'+esc(p.name)+'</span>'
+        +'<span class="dim sm" style="font-family:var(--mono)">'+esc(p.path)+'</span></div>'
+        +'<div style="display:flex;gap:16px;align-items:center">'
+        +'<span class="tok sm">'+stats.sessions+' sessions</span>'
+        +'<span class="tok sm">'+fmt(stats.tokens)+' tokens</span>'
+        +'<span class="cost sm">'+fmtC(stats.cost)+'</span>'
+        +(p.has_memory?'<span class="b b-tool">MEMORY.md</span>':'')
+        +'</div></div>'
         +memHtml+'</div>'
     }).join('')})}
 
