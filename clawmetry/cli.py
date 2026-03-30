@@ -487,6 +487,82 @@ def _start_daemon(config: dict, args) -> None:
         _start_subprocess()
 
 
+def _register_nemoclaw_sandbox_daemons() -> None:
+    """Register a LaunchAgent per NemoClaw sandbox that keeps sync daemon alive via kubectl exec."""
+    import subprocess, shutil, os, platform
+    if platform.system() != "Darwin":
+        return
+    if not shutil.which("docker"):
+        return
+
+    try:
+        r = subprocess.run(["docker", "ps", "--format", "{{.Names}}"],
+                           capture_output=True, text=True, timeout=5)
+        cluster = next((n for n in r.stdout.splitlines() if "openshell-cluster" in n), None)
+    except Exception:
+        return
+    if not cluster:
+        return
+
+    try:
+        r = subprocess.run(
+            ["docker", "exec", cluster, "kubectl", "get", "pods",
+             "-n", "openshell", "--no-headers", "-o",
+             "custom-columns=NAME:.metadata.name"],
+            capture_output=True, text=True, timeout=10
+        )
+        pods = [p for p in r.stdout.splitlines() if p and not p.startswith("openshell-")]
+    except Exception:
+        return
+
+    launch_agents = __import__("pathlib").Path.home() / "Library" / "LaunchAgents"
+    launch_agents.mkdir(parents=True, exist_ok=True)
+    docker_path = shutil.which("docker") or "/usr/local/bin/docker"
+    kubectl_path = "/opt/homebrew/bin/kubectl"
+
+    for pod in pods:
+        label = f"com.clawmetry.sandbox.{pod}"
+        plist_path = launch_agents / f"{label}.plist"
+        sync_script = "/usr/local/lib/python3.11/dist-packages/clawmetry/sync.py"
+        plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>             <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{docker_path}</string>
+        <string>exec</string>
+        <string>{cluster}</string>
+        <string>kubectl</string>
+        <string>exec</string>
+        <string>-n</string>
+        <string>openshell</string>
+        <string>{pod}</string>
+        <string>--</string>
+        <string>python3</string>
+        <string>{sync_script}</string>
+    </array>
+    <key>RunAtLoad</key>         <true/>
+    <key>KeepAlive</key>         <true/>
+    <key>ThrottleInterval</key>  <integer>30</integer>
+    <key>StandardOutPath</key>   <string>/tmp/clawmetry-{pod}.log</string>
+    <key>StandardErrorPath</key> <string>/tmp/clawmetry-{pod}.log</string>
+</dict>
+</plist>"""
+        plist_path.write_text(plist)
+        uid = os.getuid()
+        # Unload first in case it was already registered
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)],
+                      capture_output=True, check=False)
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
+                          capture_output=True, check=False)
+        if r.returncode != 0:
+            subprocess.run(["launchctl", "load", "-w", str(plist_path)],
+                          capture_output=True, check=False)
+        print(f"  ✅  Sandbox daemon registered (launchd: {label})")
+
+
 def _register_launchd(config: dict) -> None:
     from clawmetry.sync import CONFIG_DIR, LOG_FILE
     label = "com.clawmetry.sync"
@@ -911,9 +987,12 @@ def _print_nemoclaw_nodes(args) -> None:
                     ["docker", "exec", cluster, "kubectl", "exec",
                      "-n", "openshell", pod, "--",
                      "bash", "-c",
-                     "pid=$(cat /root/.clawmetry/sync.pid 2>/dev/null); "
-                     "[ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null && echo running || "
-                     "grep -r sync.py /proc/*/cmdline 2>/dev/null | grep -q clawmetry && echo running || echo stopped"],
+                     "python3 -c \""
+                     "import os,pathlib; "
+                     "p=pathlib.Path('/root/.clawmetry/sync.pid'); "
+                     "pid=int(p.read_text()) if p.exists() else 0; "
+                     "exit(0 if pid and not os.system(f'kill -0 {pid} 2>/dev/null') else 1)"
+                     "\" && echo running || echo stopped"],
                     capture_output=True, text=True, timeout=5
                 )
                 daemon_status = rd.stdout.strip()
@@ -1277,6 +1356,9 @@ def main() -> None:
     p_connect.add_argument("--foreground", action="store_true", help="Run daemon in foreground")
     p_connect.add_argument("--node-id", metavar="NAME", dest="custom_node_id", help="Custom node name (default: hostname)")
 
+    # nemoclaw-daemons
+    sub.add_parser("nemoclaw-daemons", help="Register LaunchAgents to keep NemoClaw sandbox daemons alive (macOS)")
+
     # disconnect
     sub.add_parser("disconnect", help="Stop cloud sync and remove key")
 
@@ -1315,7 +1397,7 @@ def main() -> None:
     sub.add_parser("uninstall", help="Fully uninstall clawmetry (stop daemons, remove all files)")
 
     # Parse just the first token to decide if it's a sub-command or dashboard flag
-    _subcmds = ("onboard", "connect", "disconnect", "status", "proxy", "update", "uninstall")
+    _subcmds = ("onboard", "connect", "disconnect", "status", "proxy", "update", "uninstall", "nemoclaw-daemons")
     if len(sys.argv) > 1 and sys.argv[1] in _subcmds:
         args = parser.parse_args()
         # Issue #322: Set OpenClaw config directory from CLI flag
@@ -1336,6 +1418,8 @@ def main() -> None:
             _cmd_update()
         elif args.cmd == "uninstall":
             _cmd_uninstall()
+        elif args.cmd == "nemoclaw-daemons":
+            _register_nemoclaw_sandbox_daemons()
     else:
         # Fall through to dashboard (handles --host, --port, --version, start, stop, etc.)
         dashboard_main()

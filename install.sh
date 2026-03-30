@@ -233,6 +233,64 @@ import json; json.dump({'api_key':'$HOST_API_KEY','node_id':'$sb','platform':'Li
         done
       fi
 
+      # Step 2d: Start supervisord inside each sandbox to keep daemon alive
+      echo "$SANDBOX_NAMES" | while IFS= read -r sb; do
+        [ -z "$sb" ] && continue
+        echo -e "  → Starting supervisor in sandbox ${BOLD}${sb}${NC}..."
+        docker exec "$CLUSTER_CONTAINER" kubectl exec -n openshell "$sb" -- \
+          bash -c '
+            set -e
+            # Install supervisord if missing
+            command -v supervisord >/dev/null 2>&1 || pip install --break-system-packages --quiet supervisor
+
+            # Write configs
+            mkdir -p /etc/supervisor/conf.d /var/log/supervisor /var/run
+
+            cat > /etc/supervisor/supervisord.conf << SUPEOF
+[unix_http_server]
+file=/var/run/supervisor.sock
+[supervisord]
+logfile=/var/log/supervisor/supervisord.log
+pidfile=/var/run/supervisord.pid
+nodaemon=false
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
+[supervisorctl]
+serverurl=unix:///var/run/supervisor.sock
+[include]
+files = /etc/supervisor/conf.d/*.conf
+SUPEOF
+
+            SYNC_PATH=$(python3 -c "import clawmetry.sync, os; print(os.path.abspath(clawmetry.sync.__file__))")
+            cat > /etc/supervisor/conf.d/clawmetry-sync.conf << PROGEOF
+[program:clawmetry-sync]
+command=python3 ${SYNC_PATH}
+autostart=true
+autorestart=true
+startretries=10
+startsecs=3
+stdout_logfile=/root/.clawmetry/sync.log
+stderr_logfile=/root/.clawmetry/sync.log
+stdout_logfile_maxbytes=10MB
+environment=HOME="/root"
+PROGEOF
+
+            # Kill stale PID-file daemon if any
+            kill $(cat /root/.clawmetry/sync.pid 2>/dev/null) 2>/dev/null || true
+            rm -f /root/.clawmetry/sync.pid
+
+            # Start or reload supervisord
+            if supervisorctl -c /etc/supervisor/supervisord.conf status >/dev/null 2>&1; then
+              supervisorctl -c /etc/supervisor/supervisord.conf update >/dev/null 2>&1
+              supervisorctl -c /etc/supervisor/supervisord.conf restart clawmetry-sync >/dev/null 2>&1
+            else
+              supervisord -c /etc/supervisor/supervisord.conf
+            fi
+          ' 2>/dev/null \
+          && echo -e "  ${GREEN}${BOLD}✓ Supervisor running in $sb${NC}" \
+          || echo -e "  ${DIM}⚠  Could not start supervisor in $sb${NC}"
+      done
+
       echo ""
       echo -e "  ${GREEN}${BOLD}✓ All done! Open app.clawmetry.com to see your sandboxes${NC}"
     else
