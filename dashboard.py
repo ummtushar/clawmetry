@@ -41,12 +41,13 @@ from flask import Flask, render_template_string, request, jsonify, Response, mak
 
 # History / time-series module
 try:
-    from history import HistoryDB, HistoryCollector
+    from history import HistoryDB, HistoryCollector, AgentReliabilityScorer
     _HAS_HISTORY = True
 except ImportError:
     _HAS_HISTORY = False
     HistoryDB = None
     HistoryCollector = None
+    AgentReliabilityScorer = None
 
 _history_db = None
 _history_collector = None
@@ -3154,6 +3155,8 @@ function clawmetryLogout(){
         <div id="sh-inference" style="margin-bottom:14px;"></div></div>
         <div id="sh-security-wrap" style="display:none;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);font-weight:600;margin-bottom:6px;">🛡️ Security Posture</div>
         <div id="sh-security" style="margin-bottom:14px;"></div></div>
+        <div id="sh-reliability-wrap" style="display:none;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);font-weight:600;margin-bottom:6px;">📊 Agent Reliability</div>
+        <div id="sh-reliability" style="margin-bottom:14px;"></div></div>
       </div>
     </div>
 
@@ -5141,12 +5144,13 @@ from flask import Flask, render_template_string, request, jsonify, Response, mak
 
 # History / time-series module
 try:
-    from history import HistoryDB, HistoryCollector
+    from history import HistoryDB, HistoryCollector, AgentReliabilityScorer
     _HAS_HISTORY = True
 except ImportError:
     _HAS_HISTORY = False
     HistoryDB = None
     HistoryCollector = None
+    AgentReliabilityScorer = None
 
 _history_db = None
 _history_collector = None
@@ -8363,6 +8367,8 @@ function clawmetryLogout(){
         <div id="sh-inference" style="margin-bottom:14px;"></div></div>
         <div id="sh-security-wrap" style="display:none;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);font-weight:600;margin-bottom:6px;">🛡️ Security Posture</div>
         <div id="sh-security" style="margin-bottom:14px;"></div></div>
+        <div id="sh-reliability-wrap" style="display:none;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);font-weight:600;margin-bottom:6px;">📊 Agent Reliability</div>
+        <div id="sh-reliability" style="margin-bottom:14px;"></div></div>
       </div>
     </div>
 
@@ -11842,6 +11848,9 @@ async function loadSystemHealth() {
       if (secWrap) secWrap.style.display = '';
     } else if (secWrap) { secWrap.style.display = 'none'; }
 
+    // Agent Reliability (async, non-blocking)
+    _loadReliabilityWidget();
+
     return true;
   } catch(e) {
     console.error('System health load failed', e);
@@ -11851,6 +11860,51 @@ async function loadSystemHealth() {
     document.getElementById('sh-crons').innerHTML = msg;
     document.getElementById('sh-subagents').innerHTML = msg;
     return false;
+  }
+}
+async function _loadReliabilityWidget() {
+  var wrap = document.getElementById('sh-reliability-wrap');
+  var el = document.getElementById('sh-reliability');
+  if (!wrap || !el) return;
+  try {
+    var r = await fetch('/api/reliability').then(function(r) { return r.json(); });
+    if (r.direction === 'insufficient_data' || r.error) {
+      wrap.style.display = 'none';
+      return;
+    }
+    wrap.style.display = '';
+    var icon = r.direction === 'improving' ? '📈' : r.direction === 'degrading' ? '⚠️' : '✅';
+    var color = r.direction === 'improving' ? '#22c55e' : r.direction === 'degrading' ? '#dc2626' : '#3b82f6';
+    var label = r.direction.charAt(0).toUpperCase() + r.direction.slice(1);
+    var slope = r.slope_per_session > 0 ? '+' + (r.slope_per_session * 100).toFixed(2) + '%' : (r.slope_per_session * 100).toFixed(2) + '%';
+    var html = '<div style="padding:10px;background:var(--bg-secondary);border:1px solid var(--border-secondary);border-radius:8px;">';
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">';
+    html += '<span style="font-size:16px;">' + icon + '</span>';
+    html += '<span style="font-weight:700;font-size:13px;color:' + color + ';">' + label + '</span>';
+    html += '<span style="font-size:11px;color:var(--text-muted);">(' + slope + '/session, ' + r.session_count + ' sessions, ' + r.window_days + 'd)</span>';
+    html += '</div>';
+    // Sparkline from points
+    if (r.points && r.points.length > 2) {
+      var pts = r.points;
+      var w = 200, h = 30;
+      var minD = 0, maxD = 1;
+      var stepX = w / Math.max(pts.length - 1, 1);
+      var pathD = '';
+      for (var i = 0; i < pts.length; i++) {
+        var x = Math.round(i * stepX);
+        var y = Math.round(h - (pts[i].delivery * h));
+        pathD += (i === 0 ? 'M' : 'L') + x + ',' + y;
+      }
+      var sparkColor = r.direction === 'degrading' ? '#dc2626' : r.direction === 'improving' ? '#22c55e' : '#3b82f6';
+      html += '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block;"><path d="' + pathD + '" fill="none" stroke="' + sparkColor + '" stroke-width="1.5"/></svg>';
+    }
+    if (r.degrading_dimensions && r.degrading_dimensions.length > 0) {
+      html += '<div style="margin-top:6px;font-size:11px;color:var(--text-muted);">Degrading: ' + r.degrading_dimensions.join(', ') + '</div>';
+    }
+    html += '</div>';
+    el.innerHTML = html;
+  } catch(e) {
+    wrap.style.display = 'none';
   }
 }
 function startSystemHealthRefresh() {
@@ -23408,6 +23462,21 @@ def api_security_posture():
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e), 'score': 'U', 'checks': []}), 500
+
+
+@bp_health.route('/api/reliability')
+def api_reliability():
+    """Cross-session behavioral reliability trend (AgentReliabilityScorer)."""
+    if not _history_db or not AgentReliabilityScorer:
+        return jsonify({'error': 'History module not available', 'direction': 'insufficient_data'}), 200
+    try:
+        window = int(request.args.get('window', 30))
+        window = max(1, min(window, 90))
+        scorer = AgentReliabilityScorer(_history_db)
+        result = scorer.score(window_days=window)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e), 'direction': 'insufficient_data'}), 500
 
 
 @bp_health.route('/api/heatmap')
