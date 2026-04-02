@@ -313,14 +313,13 @@ class ProxyDB:
 
     def get_spending(self, since_ts: float) -> float:
         """Get total USD spent since a timestamp."""
-        with self._lock:
-            conn = self._connect()
-            row = conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0.0) as total FROM proxy_usage WHERE timestamp >= ?",
-                (since_ts,),
-            ).fetchone()
-            conn.close()
-            return row["total"] if row else 0.0
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) as total FROM proxy_usage WHERE timestamp >= ?",
+            (since_ts,),
+        ).fetchone()
+        conn.close()
+        return row["total"] if row else 0.0
 
     def get_daily_spending(self) -> float:
         today_start = datetime.now(timezone.utc).replace(
@@ -335,20 +334,19 @@ class ProxyDB:
         return self.get_spending(month_start)
 
     def get_recent_events(self, limit: int = 50, event_type: str = None) -> List[dict]:
-        with self._lock:
-            conn = self._connect()
-            if event_type:
-                rows = conn.execute(
-                    "SELECT * FROM proxy_events WHERE event_type = ? ORDER BY timestamp DESC LIMIT ?",
-                    (event_type, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM proxy_events ORDER BY timestamp DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-            conn.close()
-            return [dict(r) for r in rows]
+        conn = self._connect()
+        if event_type:
+            rows = conn.execute(
+                "SELECT * FROM proxy_events WHERE event_type = ? ORDER BY timestamp DESC LIMIT ?",
+                (event_type, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM proxy_events ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
 
     def get_usage_summary(self, since_ts: float = 0) -> dict:
         """Get aggregated usage stats since a timestamp."""
